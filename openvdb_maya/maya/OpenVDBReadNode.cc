@@ -94,7 +94,7 @@ MStatus OpenVDBReadNode::initialize()
     aVdbFilePath = tAttr.create("VdbFilePath", "file", MFnData::kString, defaultStringData, &stat);
     if (stat != MS::kSuccess) return stat;
 
-    tAttr.setConnectable(false);
+    //tAttr.setConnectable(false);
     stat = addAttribute(aVdbFilePath);
     if (stat != MS::kSuccess) return stat;
 
