@@ -7,6 +7,10 @@ global proc AEOpenVDBReadTemplate( string $nodeAttr )
             editorTemplate -callCustom "importVDBFilePathNew" "importVDBFilePathReplace" "VdbFilePath";
         }
         editorTemplate -endLayout;
+
+        // make template compatible with callbacks AETemplateCustomContent (see cmds.callbacks)
+        AEdependNodeTemplate $nodeAttr;
+
 	    editorTemplate -addExtraControls;
     }
     editorTemplate -endScrollLayout;

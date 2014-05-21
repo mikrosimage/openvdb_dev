@@ -25,6 +25,10 @@ global proc AEOpenVDBVisualizeTemplate( string $nodeAttr )
         }
         editorTemplate -endNoOptimize;
         editorTemplate -endLayout;
+
+        // make template compatible with callbacks AETemplateCustomContent (see cmds.callbacks)
+        AEdependNodeTemplate $nodeAttr;
+
 	    editorTemplate -addExtraControls;
     }
     editorTemplate -endScrollLayout;
