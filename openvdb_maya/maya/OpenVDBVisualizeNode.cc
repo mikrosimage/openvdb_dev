@@ -328,9 +328,9 @@ MStatus OpenVDBVisualizeNode::initialize()
 
     aVdbAllGridNames = tAttr.create("VdbAllGridNames", "allgrids", MFnData::kString, defaultStringData, &stat);
     if (stat != MS::kSuccess) return stat;
-    tAttr.setConnectable(false);
+    tAttr.setConnectable(true);
     tAttr.setWritable(false);
-    tAttr.setReadable(false);
+    tAttr.setReadable(true);
     tAttr.setHidden(true);
 
     stat = addAttribute(aVdbAllGridNames);
