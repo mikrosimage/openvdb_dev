@@ -58,13 +58,14 @@ struct OpenVDBReadNode : public MPxNode
     static MObject aVdbFilePath;
     static MObject aVdbOutput;
     static MTypeId id;
+    static MObject aVdbAllGridNames;
 };
 
 
 MTypeId OpenVDBReadNode::id(0x00108A51);
 MObject OpenVDBReadNode::aVdbFilePath;
 MObject OpenVDBReadNode::aVdbOutput;
-
+MObject OpenVDBReadNode::aVdbAllGridNames;
 
 namespace {
     mvdb::NodeRegistry registerNode("OpenVDBRead", OpenVDBReadNode::id,
@@ -94,7 +95,7 @@ MStatus OpenVDBReadNode::initialize()
     aVdbFilePath = tAttr.create("VdbFilePath", "file", MFnData::kString, defaultStringData, &stat);
     if (stat != MS::kSuccess) return stat;
 
-    //tAttr.setConnectable(false);
+    // tAttr.setConnectable(false);
     stat = addAttribute(aVdbFilePath);
     if (stat != MS::kSuccess) return stat;
 
@@ -108,10 +109,20 @@ MStatus OpenVDBReadNode::initialize()
     stat = addAttribute(aVdbOutput);
     if (stat != MS::kSuccess) return stat;
 
+    aVdbAllGridNames = tAttr.create("VdbAllGridNames", "allgrids", MFnData::kString, defaultStringData, &stat);
+    if (stat != MS::kSuccess) return stat;
+    tAttr.setConnectable(true);
+    tAttr.setWritable(false);
+    tAttr.setReadable(true);
+    //tAttr.setHidden(true);
+    stat = addAttribute(aVdbAllGridNames);
+    if (stat != MS::kSuccess) return stat;
 
     // Set the attribute dependencies
 
     stat = attributeAffects(aVdbFilePath, aVdbOutput);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aVdbFilePath, aVdbAllGridNames);
     if (stat != MS::kSuccess) return stat;
 
     return MS::kSuccess;
@@ -149,6 +160,17 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
 
             MDataHandle outHandle = data.outputValue(aVdbOutput);
             outHandle.set(vdb);
+
+            MString names;
+            for(int i=0; i<(*grids).size(); i++)
+            {
+                names += (*grids)[i]->getName().c_str();
+                names += " ";
+            }
+           
+            MDataHandle outHandle2 = data.outputValue(aVdbAllGridNames);
+            outHandle2.set(names);
+
         }
 
         return data.setClean(plug);
