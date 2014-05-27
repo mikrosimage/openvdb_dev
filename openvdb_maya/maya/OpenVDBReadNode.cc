@@ -164,8 +164,11 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
             MString names;
             for(int i=0; i<(*grids).size(); i++)
             {
+                if( i > 0 )
+                {
+                    names += " ";
+                }
                 names += (*grids)[i]->getName().c_str();
-                names += " ";
             }
            
             MDataHandle outHandle2 = data.outputValue(aVdbAllGridNames);
