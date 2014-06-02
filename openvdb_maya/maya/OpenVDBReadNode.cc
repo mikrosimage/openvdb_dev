@@ -30,6 +30,8 @@
 
 /// @author FX R&D OpenVDB team
 
+#include <fnmatch.h>
+
 #include "OpenVDBPlugin.h"
 #include <openvdb_maya/OpenVDBData.h>
 #include <openvdb/io/Stream.h>
@@ -38,7 +40,8 @@
 #include <maya/MFnStringData.h>
 #include <maya/MFnPluginData.h>
 #include <maya/MFnNumericAttribute.h>
-
+#include <maya/MFnUnitAttribute.h>
+#include <maya/MTime.h>
 
 namespace mvdb = openvdb_maya;
 
@@ -59,6 +62,10 @@ struct OpenVDBReadNode : public MPxNode
     static MObject aVdbOutput;
     static MTypeId id;
     static MObject aVdbAllGridNames;
+    static MObject aResolvedVdbFilePath;
+    static MObject aVdbSequence;
+    static MObject aTime;
+    static MObject aPadding;
 };
 
 
@@ -66,10 +73,29 @@ MTypeId OpenVDBReadNode::id(0x00108A51);
 MObject OpenVDBReadNode::aVdbFilePath;
 MObject OpenVDBReadNode::aVdbOutput;
 MObject OpenVDBReadNode::aVdbAllGridNames;
+MObject OpenVDBReadNode::aResolvedVdbFilePath;
+MObject OpenVDBReadNode::aVdbSequence;
+MObject OpenVDBReadNode::aTime;
+MObject OpenVDBReadNode::aPadding;
 
 namespace {
     mvdb::NodeRegistry registerNode("OpenVDBRead", OpenVDBReadNode::id,
         OpenVDBReadNode::creator, OpenVDBReadNode::initialize);
+}
+
+std::string repeat( const std::string &word, int times ) {
+   std::string result ;
+   result.reserve(times*word.length()); // avoid repeated reallocation
+   for ( int a = 0 ; a < times ; a++ ) 
+      result += word ;
+   return result ;
+}
+
+std::string zfill(int num, int pad)
+{
+    std::ostringstream ss;
+    ss << std::setw(pad) << std::setfill('0') << num;
+    return ss.str();
 }
 
 
@@ -86,6 +112,8 @@ MStatus OpenVDBReadNode::initialize()
 {
     MStatus stat;
     MFnTypedAttribute tAttr;
+    MFnNumericAttribute nAttr;
+    MFnUnitAttribute uAttr;
 
     MFnStringData fnStringData;
     MObject defaultStringData = fnStringData.create("");
@@ -111,41 +139,122 @@ MStatus OpenVDBReadNode::initialize()
 
     aVdbAllGridNames = tAttr.create("VdbAllGridNames", "allgrids", MFnData::kString, defaultStringData, &stat);
     if (stat != MS::kSuccess) return stat;
-    tAttr.setConnectable(true);
-    tAttr.setWritable(false);
-    tAttr.setReadable(true);
-    //tAttr.setHidden(true);
+    tAttr.setHidden(true);
     stat = addAttribute(aVdbAllGridNames);
     if (stat != MS::kSuccess) return stat;
 
-    // Set the attribute dependencies
+    // sequence
+    aResolvedVdbFilePath = tAttr.create("ResolvedVdbFilePath", "rfile", MFnData::kString, defaultStringData, &stat);
+    if (stat != MS::kSuccess) return stat;
+    stat = addAttribute(aResolvedVdbFilePath);
+    if (stat != MS::kSuccess) return stat;
 
+    aVdbSequence = nAttr.create("vdbSequence", "vdbseq", MFnNumericData::kBoolean, false, &stat);
+    stat = addAttribute(aVdbSequence);
+    if (stat != MS::kSuccess) return stat;
+
+    aTime = uAttr.create("time", "tm", MFnUnitAttribute::kTime, 0, &stat);
+    stat = addAttribute(aTime);
+    if (stat != MS::kSuccess) return stat;
+
+    aPadding = nAttr.create("padding", "pd", MFnNumericData::kByte, 4, &stat);
+    stat = addAttribute(aPadding);
+    if (stat != MS::kSuccess) return stat;
+
+    // Set the attribute dependencies
+    stat = attributeAffects(aVdbFilePath, aResolvedVdbFilePath);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aVdbSequence, aResolvedVdbFilePath);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aTime, aResolvedVdbFilePath);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aPadding, aResolvedVdbFilePath);
+    if (stat != MS::kSuccess) return stat;
+    
     stat = attributeAffects(aVdbFilePath, aVdbOutput);
     if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aVdbSequence, aVdbOutput);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aTime, aVdbOutput);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aPadding, aVdbOutput);
+    if (stat != MS::kSuccess) return stat;
+
+    //stat = attributeAffects(aResolvedVdbFilePath, aVdbOutput);
+    //stat = attributeAffects(aVdbFilePath, aVdbOutput);
+    //if (stat != MS::kSuccess) return stat;
     stat = attributeAffects(aVdbFilePath, aVdbAllGridNames);
     if (stat != MS::kSuccess) return stat;
 
     return MS::kSuccess;
 }
 
-
 ////////////////////////////////////////
+
+std::string resolvedPath(MString &path, int time, int padding, bool seq)
+{
+    std::string result = path.asChar();
+
+    if(seq == true)
+    {
+        std::string pattern = "*." + repeat("[0-9]", padding) + ".vdb";
+        if( fnmatch(pattern.c_str(), result.c_str(), 0) == 0 )
+        {
+            std::string repstr = zfill(time, padding) + ".vdb";
+            result.replace(result.length() - repstr.length(), result.length(), repstr);
+        }
+    }
+        
+    return result;
+}
 
 
 MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
 {
-    if (plug == aVdbOutput) {
+
+    if (plug == aResolvedVdbFilePath) {
+        
+        MStatus status;
+        MDataHandle filePathHandle = data.inputValue (aVdbFilePath, &status);
+        if (status != MS::kSuccess) return status;
+        MDataHandle vdbSequenceHandle = data.inputValue (aVdbSequence, &status);
+        if (status != MS::kSuccess) return status;
+        MDataHandle timeHandle = data.inputValue (aTime, &status);
+        if (status != MS::kSuccess) return status;
+        MDataHandle paddingHandle = data.inputValue (aPadding, &status);
+        if (status != MS::kSuccess) return status;
+    
+        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value(),
+                paddingHandle.asChar(), vdbSequenceHandle.asBool());
+
+        MDataHandle resolvedFilePathHandle = data.outputValue (aResolvedVdbFilePath, &status);
+        if (status != MS::kSuccess) return status;
+
+        resolvedFilePathHandle.setString(MString(fp.c_str()));
+
+        return data.setClean(plug);
+    }
+    else if (plug == aVdbOutput) {
 
         MStatus status;
         MDataHandle filePathHandle = data.inputValue (aVdbFilePath, &status);
         if (status != MS::kSuccess) return status;
-
+        MDataHandle vdbSequenceHandle = data.inputValue (aVdbSequence, &status);
+        if (status != MS::kSuccess) return status;
+        MDataHandle timeHandle = data.inputValue (aTime, &status);
+        if (status != MS::kSuccess) return status;
+        MDataHandle paddingHandle = data.inputValue (aPadding, &status);
+        if (status != MS::kSuccess) return status;
+        
         if(filePathHandle.asString().length() == 0)
         {
             return MS::kFailure;
         }
 
-        std::ifstream ifile(filePathHandle.asString().asChar(), std::ios_base::binary);
+        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value(),
+                paddingHandle.asChar(), vdbSequenceHandle.asBool());
+
+        std::ifstream ifile(fp.c_str(), std::ios_base::binary);
         
         if(!ifile)
         {
@@ -178,7 +287,8 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
             }
            
             MDataHandle outHandle2 = data.outputValue(aVdbAllGridNames);
-            outHandle2.set(names);
+            //outHandle2.set(names);
+            outHandle2.setString(names);
 
         }
 
