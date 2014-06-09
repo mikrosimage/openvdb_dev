@@ -47,6 +47,7 @@
 #include <maya/MDataHandle.h>
 #include <maya/MColor.h>
 #include <maya/M3dView.h>
+#include <maya/MGlobal.h>
 
 
 namespace mvdb = openvdb_maya;
@@ -142,50 +143,55 @@ namespace {
 
 OpenVDBVisualizeNode::OpenVDBVisualizeNode()
 {
-    mSurfaceShader.setVertShader(
-        "#version 120\n"
-        "varying vec3 normal;\n"
-        "void main() {\n"
-            "normal = normalize(gl_NormalMatrix * gl_Normal);\n"
-            "gl_Position =  ftransform();\n"
-            "gl_ClipVertex = gl_ModelViewMatrix * gl_Vertex;\n"
-        "}\n");
+    MStatus stat;
+    const MGlobal::MMayaState mayaState = MGlobal::mayaState(&stat);
+    if ((stat == MS::kSuccess) && (mayaState==MGlobal::kInteractive))
+    {
+        mSurfaceShader.setVertShader(
+            "#version 120\n"
+            "varying vec3 normal;\n"
+            "void main() {\n"
+                "normal = normalize(gl_NormalMatrix * gl_Normal);\n"
+                "gl_Position =  ftransform();\n"
+                "gl_ClipVertex = gl_ModelViewMatrix * gl_Vertex;\n"
+            "}\n");
 
-    mSurfaceShader.setFragShader(
-        "#version 120\n"
-        "varying vec3 normal;\n"
-        "const vec4 skyColor = vec4(0.9, 0.9, 1.0, 1.0);\n"
-        "const vec4 groundColor = vec4(0.3, 0.3, 0.2, 1.0);\n"
-        "void main() {\n"
-            "vec3 normalized_normal = normalize(normal);\n"
-            "float w = 0.5 * (1.0 + dot(normalized_normal, vec3(0.0, 1.0, 0.0)));\n"
-            "vec4 diffuseColor = w * skyColor + (1.0 - w) * groundColor;\n"
-            "gl_FragColor = diffuseColor;\n"
-        "}\n");
+        mSurfaceShader.setFragShader(
+            "#version 120\n"
+            "varying vec3 normal;\n"
+            "const vec4 skyColor = vec4(0.9, 0.9, 1.0, 1.0);\n"
+            "const vec4 groundColor = vec4(0.3, 0.3, 0.2, 1.0);\n"
+            "void main() {\n"
+                "vec3 normalized_normal = normalize(normal);\n"
+                "float w = 0.5 * (1.0 + dot(normalized_normal, vec3(0.0, 1.0, 0.0)));\n"
+                "vec4 diffuseColor = w * skyColor + (1.0 - w) * groundColor;\n"
+                "gl_FragColor = diffuseColor;\n"
+            "}\n");
 
-    mSurfaceShader.build();
+        mSurfaceShader.build();
 
-    mPointShader.setVertShader(
-        "#version 120\n"
-        "varying vec3 normal;\n"
-        "void main() {\n"
-            "gl_FrontColor = gl_Color;\n"
-            "normal = normalize(gl_NormalMatrix * gl_Normal);\n"
-            "gl_Position =  ftransform();\n"
-            "gl_ClipVertex = gl_ModelViewMatrix * gl_Vertex;\n"
-        "}\n");
+        mPointShader.setVertShader(
+            "#version 120\n"
+            "varying vec3 normal;\n"
+            "void main() {\n"
+                "gl_FrontColor = gl_Color;\n"
+                "normal = normalize(gl_NormalMatrix * gl_Normal);\n"
+                "gl_Position =  ftransform();\n"
+                "gl_ClipVertex = gl_ModelViewMatrix * gl_Vertex;\n"
+            "}\n");
 
-    mPointShader.setFragShader(
-        "#version 120\n"
-        "varying vec3 normal;\n"
-        "void main() {\n"
-            "vec3 normalized_normal = normalize(normal);\n"
-            "float w = 0.5 * (1.0 + dot(normalized_normal, vec3(0.0, 1.0, 0.0)));\n"
-            "vec4 diffuseColor = w * gl_Color + (1.0 - w) * (gl_Color * 0.3);\n"
-            "gl_FragColor = diffuseColor;\n"
-        "}\n");
+        mPointShader.setFragShader(
+            "#version 120\n"
+            "varying vec3 normal;\n"
+            "void main() {\n"
+                "vec3 normalized_normal = normalize(normal);\n"
+                "float w = 0.5 * (1.0 + dot(normalized_normal, vec3(0.0, 1.0, 0.0)));\n"
+                "vec4 diffuseColor = w * gl_Color + (1.0 - w) * (gl_Color * 0.3);\n"
+                "gl_FragColor = diffuseColor;\n"
+            "}\n");
 
-    mPointShader.build();
+        mPointShader.build();
+    }
 }
 
 OpenVDBVisualizeNode::~OpenVDBVisualizeNode()

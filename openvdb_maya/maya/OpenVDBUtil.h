@@ -50,6 +50,7 @@
 #include <maya/MDataBlock.h>
 #include <maya/MDataHandle.h>
 #include <maya/MFnPluginData.h>
+#include <maya/MGlobal.h>
 
 #if defined(__APPLE__) || defined(MACOSX)
 #include <OpenGL/gl.h>
@@ -264,8 +265,13 @@ public:
         }
 
         // gen buffers and upload data to GPU (ignoring color array)
-        mBuffer->genVertexBuffer(points);
-        mBuffer->genIndexBuffer(indices, GL_LINES);
+        MStatus stat;
+        const MGlobal::MMayaState mayaState = MGlobal::mayaState(&stat);
+        if ((stat == MS::kSuccess) && (mayaState==MGlobal::kInteractive))
+        {
+            mBuffer->genVertexBuffer(points);
+            mBuffer->genIndexBuffer(indices, GL_LINES);
+        }
     }
 
     const openvdb::Vec3s& min() const { return mMin; }
