@@ -66,6 +66,7 @@ struct OpenVDBReadNode : public MPxNode
     static MObject aVdbSequence;
     static MObject aTime;
     static MObject aPadding;
+    static MObject aOffset;
 };
 
 
@@ -77,6 +78,7 @@ MObject OpenVDBReadNode::aResolvedVdbFilePath;
 MObject OpenVDBReadNode::aVdbSequence;
 MObject OpenVDBReadNode::aTime;
 MObject OpenVDBReadNode::aPadding;
+MObject OpenVDBReadNode::aOffset;
 
 namespace {
     mvdb::NodeRegistry registerNode("OpenVDBRead", OpenVDBReadNode::id,
@@ -104,7 +106,7 @@ std::string zfill(int num, int pad)
 
 void* OpenVDBReadNode::creator()
 {
-        return new OpenVDBReadNode();
+    return new OpenVDBReadNode();
 }
 
 
@@ -160,6 +162,11 @@ MStatus OpenVDBReadNode::initialize()
     aPadding = nAttr.create("padding", "pd", MFnNumericData::kByte, 4, &stat);
     stat = addAttribute(aPadding);
     if (stat != MS::kSuccess) return stat;
+    
+    aOffset = nAttr.create("offset", "of", MFnNumericData::kByte, 0, &stat);
+    stat = addAttribute(aOffset);
+    if (stat != MS::kSuccess) return stat;
+
 
     // Set the attribute dependencies
     stat = attributeAffects(aVdbFilePath, aResolvedVdbFilePath);
@@ -170,6 +177,8 @@ MStatus OpenVDBReadNode::initialize()
     if (stat != MS::kSuccess) return stat;
     stat = attributeAffects(aPadding, aResolvedVdbFilePath);
     if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aOffset, aResolvedVdbFilePath);
+    if (stat != MS::kSuccess) return stat;
     
     stat = attributeAffects(aVdbFilePath, aVdbOutput);
     if (stat != MS::kSuccess) return stat;
@@ -178,6 +187,8 @@ MStatus OpenVDBReadNode::initialize()
     stat = attributeAffects(aTime, aVdbOutput);
     if (stat != MS::kSuccess) return stat;
     stat = attributeAffects(aPadding, aVdbOutput);
+    if (stat != MS::kSuccess) return stat;
+    stat = attributeAffects(aOffset, aVdbOutput);
     if (stat != MS::kSuccess) return stat;
 
     //stat = attributeAffects(aResolvedVdbFilePath, aVdbOutput);
@@ -213,7 +224,7 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
 {
 
     if (plug == aResolvedVdbFilePath) {
-        
+       
         MStatus status;
         MDataHandle filePathHandle = data.inputValue (aVdbFilePath, &status);
         if (status != MS::kSuccess) return status;
@@ -223,8 +234,10 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
         if (status != MS::kSuccess) return status;
         MDataHandle paddingHandle = data.inputValue (aPadding, &status);
         if (status != MS::kSuccess) return status;
-    
-        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value(),
+        MDataHandle offsetHandle = data.inputValue (aOffset, &status);
+        if (status != MS::kSuccess) return status;
+
+        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value()+(int)offsetHandle.asChar(),
                 paddingHandle.asChar(), vdbSequenceHandle.asBool());
 
         MDataHandle resolvedFilePathHandle = data.outputValue (aResolvedVdbFilePath, &status);
@@ -245,13 +258,15 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
         if (status != MS::kSuccess) return status;
         MDataHandle paddingHandle = data.inputValue (aPadding, &status);
         if (status != MS::kSuccess) return status;
-        
+        MDataHandle offsetHandle = data.inputValue (aOffset, &status);
+        if (status != MS::kSuccess) return status;
+
         if(filePathHandle.asString().length() == 0)
         {
             return MS::kFailure;
         }
 
-        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value(),
+        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value()+(int)offsetHandle.asChar(),
                 paddingHandle.asChar(), vdbSequenceHandle.asBool());
 
         std::ifstream ifile(fp.c_str(), std::ios_base::binary);
