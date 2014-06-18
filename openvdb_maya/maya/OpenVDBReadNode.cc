@@ -36,6 +36,9 @@
 #include <openvdb_maya/OpenVDBData.h>
 #include <openvdb/io/Stream.h>
 
+#include <maya/MGlobal.h>
+#include <maya/MString.h>
+
 #include <maya/MFnTypedAttribute.h>
 #include <maya/MFnStringData.h>
 #include <maya/MFnPluginData.h>
@@ -223,7 +226,8 @@ std::string resolvedPath(MString &path, int time, int padding, bool seq)
 MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
 {
 
-    if (plug == aResolvedVdbFilePath) {
+    if (plug == aResolvedVdbFilePath) 
+    {
        
         MStatus status;
         MDataHandle filePathHandle = data.inputValue (aVdbFilePath, &status);
@@ -263,6 +267,8 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
 
         if(filePathHandle.asString().length() == 0)
         {
+            MString errorMsg = MString("OpenVDBReadNode (") + plug.name() + MString("): Empty filename specified");
+            MGlobal::displayWarning(errorMsg);
             return MS::kFailure;
         }
 
@@ -273,6 +279,10 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
         
         if(!ifile)
         {
+            // Note: Detailed i/o error (errno) is gcc specific 
+            MString errorMsg = MString("OpenVDBReadNode (") + plug.name() + MString("): ") + MString(strerror(errno));
+            MGlobal::displayWarning(errorMsg);
+
             return MS::kFailure;
         }
 
@@ -305,6 +315,11 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
             //outHandle2.set(names);
             outHandle2.setString(names);
 
+        }
+        else
+        {
+            MString errorMsg = MString("OpenVDBReadNode (") + plug.name() + MString("): no grids found!");
+            MGlobal::displayWarning(errorMsg);
         }
 
         return data.setClean(plug);
