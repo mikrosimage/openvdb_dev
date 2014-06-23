@@ -166,7 +166,7 @@ MStatus OpenVDBReadNode::initialize()
     stat = addAttribute(aPadding);
     if (stat != MS::kSuccess) return stat;
     
-    aOffset = nAttr.create("offset", "of", MFnNumericData::kByte, 0, &stat);
+    aOffset = nAttr.create("offset", "of", MFnNumericData::kInt, 0, &stat);
     stat = addAttribute(aOffset);
     if (stat != MS::kSuccess) return stat;
 
@@ -241,7 +241,7 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
         MDataHandle offsetHandle = data.inputValue (aOffset, &status);
         if (status != MS::kSuccess) return status;
 
-        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value()+(int)offsetHandle.asChar(),
+        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value()+offsetHandle.asInt(),
                 paddingHandle.asChar(), vdbSequenceHandle.asBool());
 
         MDataHandle resolvedFilePathHandle = data.outputValue (aResolvedVdbFilePath, &status);
@@ -272,7 +272,7 @@ MStatus OpenVDBReadNode::compute(const MPlug& plug, MDataBlock& data)
             return MS::kFailure;
         }
 
-        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value()+(int)offsetHandle.asChar(),
+        std::string fp = resolvedPath(filePathHandle.asString(), (int)timeHandle.asTime().value()+offsetHandle.asInt(),
                 paddingHandle.asChar(), vdbSequenceHandle.asBool());
 
         std::ifstream ifile(fp.c_str(), std::ios_base::binary);
