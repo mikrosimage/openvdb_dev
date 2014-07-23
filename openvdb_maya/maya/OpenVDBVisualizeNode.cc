@@ -347,7 +347,7 @@ MStatus OpenVDBVisualizeNode::initialize()
     if (stat != MS::kSuccess) return stat;
     tAttr.setConnectable(false);
     // Note: fix maya scene re opening, selected grid is store in file and then properly set
-    //tAttr.setWritable(false);
+    tAttr.setWritable(true);
     tAttr.setReadable(false);
     tAttr.setHidden(true);
 
