@@ -47,6 +47,7 @@
 # against compatible versions of the Boost, OpenEXR and TBB libraries.
 #
 
+MAYA_LOCATION = /s/apps/packages/cgDev/mayaAPI/2016.ext2/platform-linux
 # MAYA_LOCATION should be set to the directory where Maya is installed.
 ifeq (,$(MAYA_LOCATION))
 $(warning Warning: $$(MAYA_LOCATION) is not set)
@@ -68,12 +69,12 @@ OPENVDB_LIB_DIR := $(INSTALL_DIR)/lib
 OPENVDB_LIB := -lopenvdb
 
 # The parent directory of the boost/ header directory
-BOOST_INCL_DIR :=
+BOOST_INCL_DIR := /s/apps/packages/dev/boost/1.61.0/platform-linux/build-release/include
 
 # The parent directory of the OpenEXR/ header directory (which contains half.h)
-HALF_INCL_DIR :=
+HALF_INCL_DIR := /s/apps/packages/cgDev/ilmbase/2.2.0.mikros.0.1/platform-linux/include/OpenEXR
 # The directory containing libHalf
-HALF_LIB_DIR :=
+HALF_LIB_DIR := /s/apps/packages/cgDev/ilmbase/2.2.0.mikros.0.1/platform-linux/lib
 HALF_LIB := -lHalf
 
 # The parent directory of the tbb/ header directory

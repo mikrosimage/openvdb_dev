@@ -81,6 +81,11 @@
 # The directory into which to install libraries, executables and header files
 INSTALL_DIR := /tmp/OpenVDB
 
+# Mikros settings
+HT = /s/apps/packages/cg/houdini/16.0.736/platform-linux/houdiniQt-4/toolkit
+HDSO=/s/apps/packages/cg/houdini/16.0.736/platform-linux/houdiniQt-4/dsolib
+
+
 # The parent directory of the boost/ header directory
 BOOST_INCL_DIR := $(HT)/include
 
@@ -112,23 +117,23 @@ CONCURRENT_MALLOC_LIB_DIR := $(HDSO)
 
 # The parent directory of the cppunit/ header directory
 # (leave blank if CppUnit is unavailable)
-CPPUNIT_INCL_DIR := /rel/map/generic-2013.22/sys_include
+CPPUNIT_INCL_DIR := /s/apps/packages/dev/cppunit/1.12.1/platform-linux/build-release/include
 # The directory containing libcppunit
-CPPUNIT_LIB_DIR := /rel/depot/third_party_build/cppunit/1.10.2-7/opt-ws5-x86_64-gccWS5_64/lib
+CPPUNIT_LIB_DIR := /s/apps/packages/dev/cppunit/1.12.1/platform-linux/build-release/lib
 CPPUNIT_LIB := -lcppunit
 
 # The parent directory of the log4cplus/ header directory
 # (leave blank if log4cplus is unavailable)
-LOG4CPLUS_INCL_DIR := /rel/folio/log4cplus/log4cplus-1.0.3-latest/sys_include
+LOG4CPLUS_INCL_DIR := /usr/include/log4cplus
 # The directory containing liblog4cplus
-LOG4CPLUS_LIB_DIR := /rel/folio/log4cplus/log4cplus-1.0.3-latest/library
+LOG4CPLUS_LIB_DIR := /usr/lib
 LOG4CPLUS_LIB := -llog4cplus
 
 # The directory containing glfw.h
 # (leave blank if GLFW is unavailable)
-GLFW_INCL_DIR := /rel/third_party/glfw/current/include
+GLFW_INCL_DIR := /s/apps/packages/cgDev/glfw/3.2.0/platform-linux/build-release/include
 # The directory containing libglfw
-GLFW_LIB_DIR := /rel/third_party/glfw/current/lib
+GLFW_LIB_DIR := /s/apps/packages/cgDev/glfw/3.2.0/platform-linux/build-release/lib
 GLFW_LIB := -lglfw
 
 # The version of Python for which to build the OpenVDB module
@@ -741,7 +746,7 @@ test:
 	@echo "$@"': $$(CPPUNIT_INCL_DIR) is undefined'
 endif
 
-install: lib python vdb_print vdb_render vdb_view doc pydoc
+install: lib
 	mkdir -p $(INSTALL_DIR)/include/openvdb
 	@echo "Created $(INSTALL_DIR)/include/openvdb"
 	pushd $(INSTALL_DIR)/include/openvdb > /dev/null; \
@@ -749,12 +754,6 @@ install: lib python vdb_print vdb_render vdb_view doc pydoc
 	for f in $(INCLUDE_NAMES); \
 	    do cp -f $$f $(INSTALL_DIR)/include/openvdb/$$f; done
 	@#
-	if [ -f $(LIBVIEWER) ]; \
-	then \
-	    mkdir -p $(INSTALL_DIR)/include/openvdb_viewer; \
-	    echo "Created $(INSTALL_DIR)/include/openvdb_viewer"; \
-	    cp -f $(LIBVIEWER_PUBLIC_INCLUDE_NAMES) $(INSTALL_DIR)/include/openvdb_viewer/; \
-	fi
 	@echo "Copied header files to $(INSTALL_DIR)/include"
 	@#
 	mkdir -p $(INSTALL_DIR)/lib
@@ -767,53 +766,6 @@ install: lib python vdb_print vdb_render vdb_view doc pydoc
 	    fi; \
 	    popd > /dev/null
 	@echo "Copied libopenvdb to $(INSTALL_DIR)/lib/"
-	@#
-	if [ -f $(LIBVIEWER) ]; \
-	then \
-	    cp -f $(LIBVIEWER) $(INSTALL_DIR)/lib; \
-	    pushd $(INSTALL_DIR)/lib > /dev/null; \
-	        if [ -f $(LIBVIEWER_SHARED) ]; then \
-	            ln -f -s $(LIBVIEWER_SHARED) $(LIBVIEWER_NAME).so; fi; \
-	        popd > /dev/null; \
-	    echo "Copied libopenvdb_viewer to $(INSTALL_DIR)/lib/"; \
-	fi
-	@#
-	if [ -f $(PYTHON_MODULE) ]; \
-	then \
-	    installdir=$(INSTALL_DIR)/python/include/python$(PYTHON_VERSION); \
-	    mkdir -p $${installdir}; \
-	    echo "Created $${installdir}"; \
-	    cp -f $(PYTHON_PUBLIC_INCLUDE_NAMES) $${installdir}/; \
-	    echo "Copied Python header files to $${installdir}"; \
-	    installdir=$(INSTALL_DIR)/python/lib/python$(PYTHON_VERSION); \
-	    mkdir -p $${installdir}; \
-	    echo "Created $${installdir}"; \
-	    cp -f $(PYTHON_MODULE) $${installdir}/; \
-	    pushd $${installdir} > /dev/null; \
-	    ln -f -s $(PYTHON_MODULE) $(PYTHON_SONAME); \
-	    popd > /dev/null; \
-	    echo "Copied Python module to $${installdir}"; \
-	fi
-	@#
-	mkdir -p $(INSTALL_DIR)/bin
-	@echo "Created $(INSTALL_DIR)/bin/"
-	cp -f vdb_print $(INSTALL_DIR)/bin
-	@echo "Copied vdb_print to $(INSTALL_DIR)/bin/"
-	cp -f vdb_render $(INSTALL_DIR)/bin
-	@echo "Copied vdb_render to $(INSTALL_DIR)/bin/"
-	if [ -f vdb_view ]; \
-	then \
-	    cp -f vdb_view $(INSTALL_DIR)/bin; \
-	    echo "Copied vdb_view to $(INSTALL_DIR)/bin/"; \
-	fi
-	@#
-	if [ -d doc/html ]; \
-	then \
-	    mkdir -p $(INSTALL_DIR)/share/doc/openvdb; \
-	    echo "Created $(INSTALL_DIR)/share/doc/openvdb/"; \
-	    cp -r -f doc/html $(INSTALL_DIR)/share/doc/openvdb; \
-	    echo "Copied documentation to $(INSTALL_DIR)/share/doc/openvdb/"; \
-	fi
 
 # TODO: This accumulates all source file dependencies into a single file
 # containing a rule for each *.o file.  Consider generating a separate
