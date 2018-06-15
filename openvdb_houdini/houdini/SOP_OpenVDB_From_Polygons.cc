@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -49,11 +49,20 @@
 #include <CH/CH_Manager.h>
 #include <PRM/PRM_Parm.h>
 #include <PRM/PRM_SharedFunc.h>
+#include <UT/UT_Version.h>
 
-#include <iostream>
+#include <algorithm> // for std::max()
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <limits>
 #include <vector>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
 
 
 namespace hvdb = openvdb_houdini;
@@ -85,7 +94,7 @@ evalAttrType(const UT_String& attrStr, UT_String& attrName, int& attrClass)
 }
 
 inline int
-lookupAttrInput(const PRM_SpareData *spare)
+lookupAttrInput(const PRM_SpareData* spare)
 {
     const char  *istring;
     if (!spare) return 0;
@@ -94,14 +103,14 @@ lookupAttrInput(const PRM_SpareData *spare)
 }
 
 inline void
-sopBuildAttrMenu(void *data, PRM_Name *menuEntries, int themenusize,
-    const PRM_SpareData *spare, const PRM_Parm *parm)
+sopBuildAttrMenu(void* data, PRM_Name* menuEntries, int themenusize,
+    const PRM_SpareData* spare, const PRM_Parm*)
 {
-    if (data == NULL || menuEntries == NULL || spare == NULL) return;
+    if (data == nullptr || menuEntries == nullptr || spare == nullptr) return;
 
-    SOP_Node* sop = CAST_SOPNODE((OP_Node *)data);
+    SOP_Node* sop = CAST_SOPNODE(static_cast<OP_Node*>(data));
 
-    if (sop == NULL) {
+    if (sop == nullptr) {
         // terminate and quit
         menuEntries[0].setToken(0);
         menuEntries[0].setLabel(0);
@@ -204,47 +213,57 @@ class SOP_OpenVDB_From_Polygons: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_From_Polygons(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_From_Polygons() {}
+    ~SOP_OpenVDB_From_Polygons() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
-    virtual int isRefInput(unsigned i ) const { return (i == 1); }
+    int isRefInput(unsigned i ) const override { return (i == 1); }
 
     int convertUnits();
 
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions
+    {
+#endif
+    public:
+        float voxelSize() const { return mVoxelSize; }
+    protected:
+        OP_ERROR cookVDBSop(OP_Context&) override;
+    private:
+        int constructGenericAtttributeLists(
+            hvdb::AttributeDetailList &pointAttributes,
+            hvdb::AttributeDetailList &vertexAttributes,
+            hvdb::AttributeDetailList &primitiveAttributes,
+            const GU_Detail&,
+            const openvdb::Int32Grid& closestPrimGrid,
+            const float time);
+
+        template <class ValueType>
+        void addAttributeDetails(
+            hvdb::AttributeDetailList &attributeList,
+            const GA_Attribute *attribute,
+            const GA_AIFTuple *tupleAIF,
+            const int attrTupleSize,
+            const openvdb::Int32Grid& closestPrimGrid,
+            std::string& customName,
+            int vecType = -1);
+
+        void transferAttributes(
+            hvdb::AttributeDetailList &pointAttributes,
+            hvdb::AttributeDetailList &vertexAttributes,
+            hvdb::AttributeDetailList &primitiveAttributes,
+            const openvdb::Int32Grid&,
+            openvdb::math::Transform::Ptr& transform,
+            const GU_Detail&);
+
+        float mVoxelSize = 0.1f;
+#if VDB_COMPILABLE_SOP
+    }; // class Cache
+#endif
+
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
-    virtual void resolveObsoleteParms(PRM_ParmList*);
-
-    int constructGenericAtttributeLists(
-        hvdb::AttributeDetailList &pointAttributes,
-        hvdb::AttributeDetailList &vertexAttributes,
-        hvdb::AttributeDetailList &primitiveAttributes,
-        const GU_Detail&,
-        const openvdb::Int32Grid& closestPrimGrid,
-        const float time);
-
-    template <class ValueType>
-    void addAttributeDetails(
-        hvdb::AttributeDetailList &attributeList,
-        const GA_Attribute *attribute,
-        const GA_AIFTuple *tupleAIF,
-        const int attrTupleSize,
-        const openvdb::Int32Grid& closestPrimGrid,
-        std::string& customName,
-        int vecType = -1);
-
-    void transferAttributes(
-        hvdb::AttributeDetailList &pointAttributes,
-        hvdb::AttributeDetailList &vertexAttributes,
-        hvdb::AttributeDetailList &primitiveAttributes,
-        const openvdb::Int32Grid&,
-        openvdb::math::Transform::Ptr& transform,
-        const GU_Detail&);
-
-private:
-    float mVoxelSize;
+    bool updateParmsFlags() override;
+    void resolveObsoleteParms(PRM_ParmList*) override;
 };
 
 
@@ -259,7 +278,7 @@ int
 convertUnitsCB(void* data, int /*idx*/, float /*time*/, const PRM_Template*)
 {
    SOP_OpenVDB_From_Polygons* sop = static_cast<SOP_OpenVDB_From_Polygons*>(data);
-   if (sop == NULL) return 0;
+   if (sop == nullptr) return 0;
    return sop->convertUnits();
 }
 
@@ -273,7 +292,7 @@ convertUnitsCB(void* data, int /*idx*/, float /*time*/, const PRM_Template*)
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
@@ -282,91 +301,141 @@ newSopOperator(OP_OperatorTable* table)
     // Output grids
 
     //  distance field
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "distanceField", "")
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "builddistance", "")
         .setDefault(PRMoneDefaults)
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN)
-        .setHelpText("Enable / disable the level set output."));
+        .setTooltip("Enable / disable the level set output.")
+        .setDocumentation(nullptr));
 
-    parms.add(hutil::ParmFactory(PRM_STRING, "distanceFieldGridName", "Distance VDB")
+    parms.add(hutil::ParmFactory(PRM_STRING, "distancename", "Distance VDB")
         .setDefault("surface")
-        .setHelpText("Outputs a distance field / level set grid. Voxels "
-            "in the narrow band are made active. (A grid name can optionally be "
-            "specified in the string field)"));
+        .setTooltip(
+            "Output a signed distance field VDB with the given name.\n\n"
+            "An SDF stores the distance to the surface in each voxel."
+            " If a voxel is inside the surface, the distance is negative."));
 
     //  fog volume
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "fogVolume", "")
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "buildfog", "")
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN)
-        .setHelpText("Enable / disable the fog volume output."));
+        .setTooltip("Enable / disable the fog volume output.")
+        .setDocumentation(nullptr));
 
-    parms.add(hutil::ParmFactory(PRM_STRING, "fogVolumeGridName", "Fog VDB")
+    parms.add(hutil::ParmFactory(PRM_STRING, "fogname", "Fog VDB")
         .setDefault("density")
-        .setHelpText("Outputs the fog volume grid. Generated from the signed "
-            "distance field / level set, the interior narrow band is "
-            "transformed into a 0 to 1 gradient and the remaining interior "
-            "values are set to 1. Exterior values and the background are "
-            "set to 0. The interior is still a sparse representations but "
-            "the values are active."));
+        .setTooltip(
+            "Output a fog volume VDB with the given name.\n\n"
+            "Voxels inside the surface have value one, and voxels outside"
+            " have value zero.  Within a narrow band centered on the surface,"
+            " voxel values vary linearly from zero to one.\n\n"
+            "Turn on __Fill Interior__ to create a solid VDB"
+            " (from an airtight surface) instead of a narrow band."));
 
     //////////
     // Conversion settings
 
-    parms.add(hutil::ParmFactory(PRM_HEADING, "conversionHeading", "Conversion settings"));
+    parms.add(hutil::ParmFactory(PRM_HEADING, "conversionheading", "Conversion settings"));
 
     parms.add(hutil::ParmFactory(PRM_STRING, "group", "Reference VDB")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setSpareData(&SOP_Node::theSecondInput)
-        .setHelpText("References the first/selected grid's transform. The "
-            "narrow band width can also be matched if the reference "
-            "grid is a level set."));
+        .setChoiceList(&hutil::PrimGroupMenuInput2)
+        .setTooltip(
+            "Give the output VDB the same orientation and voxel size as the selected VDB,"
+            " and match the narrow band width if the reference VDB is a level set.")
+        .setDocumentation(
+            "Give the output VDB the same orientation and voxel size as"
+            " the selected VDB (see [specifying volumes|/model/volumes#group])"
+            " and match the narrow band width if the reference VDB is a level set."));
 
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelSize", "Voxel Size")
+    // Voxel size or voxel count menu
+    parms.add(hutil::ParmFactory(PRM_STRING, "sizeorcount", "Voxel")
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
+            "worldVoxelSize",   "Size in World Units",
+            "countX",           "Count Along X Axis",
+            "countY",           "Count Along Y Axis",
+            "countZ",           "Count Along Z Axis",
+            "countLongest",     "Count Along Longest Axis"
+        })
+        .setDefault("worldVoxelSize")
+        .setTooltip(
+            "How to specify the voxel size: either in world units or as"
+            " a voxel count along one axis"));
+
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelsize", "Voxel Size")
         .setDefault(PRMpointOneDefaults)
-        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 5));
+        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 5)
+        .setTooltip(
+            "The desired voxel size in world units\n\n"
+            "Surface features smaller than this will not be represented in the output VDB."));
+
+    parms.add(hutil::ParmFactory(PRM_INT_J, "voxelcount", "Voxel Count")
+        .setDefault(100)
+        .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 500)
+        .setTooltip(
+            "The desired voxel count along one axis\n\n"
+            "The resulting voxel count might be off by one voxel"
+            " due to roundoff errors during the conversion process."));
 
     // Narrow-band width {
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "worldSpaceUnits", "Use World Space for Band")
-        .setCallbackFunc(&convertUnitsCB));
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "useworldspaceunits",
+        "Use World Space Units for Narrow Band")
+        .setCallbackFunc(&convertUnitsCB)
+        .setTooltip(
+            "If enabled, specify the narrow band width in world units,"
+            " otherwise in voxels."));
 
     //   voxel space units
-    parms.add(hutil::ParmFactory(PRM_INT_J, "exteriorBandWidth", "Exterior Band Voxels")
+    parms.add(hutil::ParmFactory(PRM_INT_J, "exteriorbandvoxels", "Exterior Band Voxels")
         .setDefault(PRMthreeDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 10)
-        .setHelpText("Specify the width of the exterior (d >= 0) portion of the narrow band. "
-            "(3 voxel units is optimal for level set operations.)"));
+        .setTooltip(
+            "The width of the exterior (distance >= 0) portion of the narrow band\n"
+            "Many level set operations require a minimum of three voxels.")
+        .setDocumentation(nullptr));
 
-    parms.add(hutil::ParmFactory(PRM_INT_J, "interiorBandWidth", "Interior Band Voxels")
+    parms.add(hutil::ParmFactory(PRM_INT_J, "interiorbandvoxels", "Interior Band Voxels")
         .setDefault(PRMthreeDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 10)
-        .setHelpText("Specify the width of the interior (d < 0) portion of the narrow band. "
-            "(3 voxel units is optimal for level set operations.)"));
+        .setTooltip(
+            "The width of the interior (distance < 0) portion of the narrow band\n"
+            "Many level set operations require a minimum of three voxels.")
+        .setDocumentation(nullptr));
 
     //   world space units
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "exteriorBandWidthWS", "Exterior Band")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "exteriorband", "Exterior Band")
         .setDefault(PRMoneDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1e-5, PRM_RANGE_UI, 10)
-        .setHelpText("Specify the width of the exterior (d >= 0) portion of the narrow band."));
+        .setTooltip("The width of the exterior (distance >= 0) portion of the narrow band")
+        .setDocumentation(
+            "The width of the exterior (_distance_ => 0) portion of the narrow band"));
 
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "interiorBandWidthWS",  "Interior Band")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "interiorband", "Interior Band")
         .setDefault(PRMoneDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1e-5, PRM_RANGE_UI, 10)
-        .setHelpText("Specify the width of the interior (d < 0) portion of the narrow band."));
+        .setTooltip("The width of the interior (distance < 0) portion of the narrow band")
+        .setDocumentation(
+            "The width of the interior (_distance_ < 0) portion of the narrow band"));
     // }
 
     // Options
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "fillInterior", "Fill Interior")
-        .setHelpText("Extract signed distances for all interior voxels, this "
-            "operation is going to densify the interior of the model. "
-            "Requires a closed watertight mesh."));
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "fillinterior", "Fill Interior")
+        .setTooltip(
+            "Extract signed distances for all interior voxels.\n\n"
+            "This operation densifies the interior of the model."
+            " It requires a closed, watertight surface."));
 
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "unsignedDist", "Unsigned Distance Field")
-        .setHelpText("Generate an unsigned distance field. This operation "
-            "will work on any mesh, i.e. does not require a closed "
-            "watertight mesh."));
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "unsigneddist", "Unsigned Distance Field")
+        .setTooltip(
+            "Generate an unsigned distance field.\n"
+            "This operation will work on any surface, whether or not it is closed or watertight.")
+        .setDocumentation(
+            "Generate an unsigned distance field.\n\n"
+            "This operation will work on any surface, whether or not"
+            " it is closed or watertight.  It is similar to the Minimum"
+            " function of the [Node:sop/isooffset] node."));
 
     //////////
     // Mesh attribute transfer {Point, Vertex & Primitive}
 
-    parms.add(hutil::ParmFactory(PRM_HEADING, "transferHeading", "Attribute transfer"));
+    parms.add(hutil::ParmFactory(PRM_HEADING, "transferheading", "Attribute Transfer"));
 
     hutil::ParmList attrParms;
 
@@ -374,14 +443,13 @@ newSopOperator(OP_OperatorTable* table)
     attrParms.add(hutil::ParmFactory(PRM_STRING, "attribute#",  "Attribute")
         .setChoiceList(&PrimAttrMenu)
         .setSpareData(&SOP_Node::theFirstInput)
-        .setHelpText("Select a point, vertex or primitive attribute "
-            "to transfer. Supports integer and floating point "
-            "attributes of arbitrary precisions and tuple sizes."));
+        .setTooltip(
+            "A point, vertex, or primitive attribute from which to create a VDB\n\n"
+            "Supports integer and floating point attributes of arbitrary"
+            " precision and tuple size."));
 
     attrParms.add(hutil::ParmFactory(PRM_STRING, "attributeGridName#", "VDB Name")
-        .setHelpText("The original attribute name is used as the output grid "
-            "name by default. A different grid name can be specified in this "
-            "field if desired."));
+        .setTooltip("The name for this VDB primitive (leave blank to use the attribute's name)"));
 
     // Vec type menu
     {
@@ -393,16 +461,21 @@ newSopOperator(OP_OperatorTable* table)
 
         attrParms.add(hutil::ParmFactory(PRM_ORD, "vecType#", "Vector Type")
             .setDefault(PRMzeroDefaults)
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items));
+            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
+            .setTooltip("How vector values should be interpreted"));
     }
 
     // Add multi parm
     parms.add(hutil::ParmFactory(PRM_MULTITYPE_LIST, "attrList", "Surface Attributes")
-        .setHelpText("Transfer surface attributes (point/vertex/primitive) to "
-            "all active voxels in the distance field / level set.")
         .setMultiparms(attrParms)
-        .setDefault(PRMzeroDefaults));
-
+        .setDefault(PRMzeroDefaults)
+        .setTooltip(
+            "Generate additional VDB primitives that store the values of"
+            " primitive (face), point, or vertex attributes.")
+        .setDocumentation(
+            "Generate additional VDB primitives that store the values of primitive"
+            " (face), point, or vertex [attributes|/model/attributes].\n\n"
+            "Only voxels in the narrow band around the surface will be set."));
 
 
     //////////
@@ -421,23 +494,97 @@ newSopOperator(OP_OperatorTable* table)
     obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "sdfGridName", "")); // fix
     obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "outputClosestPrimGrid", ""));
     obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "closestPrimGridName", ""));
-    obsoleteParms.add(hutil::ParmFactory(PRM_HEADING, "transformHeading", "Transform"));
-    obsoleteParms.add(hutil::ParmFactory(PRM_HEADING, "outputHeading", "Output grids"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_HEADING, "transformHeading", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_HEADING, "outputHeading", ""));
     obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "hermiteData", ""));
-    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "hermiteDataGridName", "Hermite VDB"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "hermiteDataGridName", ""));
     obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "matchlevelset", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "distanceField", "")
+        .setDefault(PRMoneDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "distanceFieldGridName", "")
+        .setDefault("surface"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "fogVolume", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "fogVolumeGridName", "")
+        .setDefault("density"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_HEADING, "conversionHeading", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "sizeOrCount", "")
+        .setDefault("worldVoxelSize"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "voxelSize", "")
+        .setDefault(PRMpointOneDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_INT_J, "voxelCount", "").setDefault(100));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "worldSpaceUnits", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_INT_J, "exteriorBandWidth", "")
+        .setDefault(PRMthreeDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_INT_J, "interiorBandWidth", "")
+        .setDefault(PRMthreeDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "exteriorBandWidthWS", "")
+        .setDefault(PRMoneDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "interiorBandWidthWS", "")
+        .setDefault(PRMoneDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "fillInterior", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "unsignedDist", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_HEADING, "transferHeading", ""));
+    //obsoleteParms.add(hutil::ParmFactory(PRM_MULTITYPE_LIST, "attrList", "")
+    //    .setDefault(PRMzeroDefaults)); ///< @todo crashes in OP_Node::createObsoleteParmList()
+
+    /// @todo obsoleteAttrParms
 
     //////////
     // Register this operator.
 
     hvdb::OpenVDBOpFactory("OpenVDB From Polygons",
         SOP_OpenVDB_From_Polygons::factory, parms, *table)
-        .addAlias("OpenVDB From Mesh")
-        .addAlias("OpenVDB Mesh Voxelizer")
-        .setObsoleteParms(obsoleteParms)
         .addInput("Polygons to Convert")
-        .addOptionalInput("Optional Reference VDB "
-            "(for transform matching)");
+        .addOptionalInput("Optional Reference VDB (for transform matching)")
+        .setObsoleteParms(obsoleteParms)
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_GENERATOR,
+            []() { return new SOP_OpenVDB_From_Polygons::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Convert polygonal surfaces and/or surface attributes into VDB volumes.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node can create signed or unsigned distance fields\n\
+and/or density fields (\"fog volumes\") from polygonal surfaces.\n\
+\n\
+When you create a fog volume you can choose either to fill the band of voxels\n\
+on the surface or (if you have an airtight surface) to fill the interior\n\
+of the surface (see the __Fill interior__ parameter).\n\
+\n\
+Since the resulting VDB volumes store only the voxels near the surface,\n\
+they can have a much a higher effective resolution than a traditional volume\n\
+created with [Node:sop/isooffset].\n\
+\n\
+You can connect a VDB to the second input to automatically use that VDB's\n\
+orientation and voxel size (see the __Reference VDB__ parameter).\n\
+\n\
+NOTE:\n\
+    The input geometry must be a quad or triangle mesh.\n\
+    This node will convert the input surface into such a mesh if necessary.\n\
+\n\
+@inputs\n\
+\n\
+Polygonal mesh to convert:\n\
+    The polygonal surface to convert.\n\
+Optional reference VDB:\n\
+    If connected, give the output VDB the same orientation and voxel size\n\
+    as a VDB from this input.\n\
+\n\
+@related\n\
+- [OpenVDB Create|Node:sop/DW_OpenVDBCreate]\n\
+- [OpenVDB From Particles|Node:sop/DW_OpenVDBFromParticles]\n\
+- [Node:sop/isooffset]\n\
+- [Node:sop/vdbfrompolygons]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -455,7 +602,6 @@ SOP_OpenVDB_From_Polygons::factory(OP_Network* net,
 SOP_OpenVDB_From_Polygons::SOP_OpenVDB_From_Polygons(OP_Network* net,
     const char* name, OP_Operator* op)
     : hvdb::SOP_NodeVDB(net, name, op)
-    , mVoxelSize(0.1)
 {
 }
 
@@ -466,25 +612,35 @@ SOP_OpenVDB_From_Polygons::SOP_OpenVDB_From_Polygons(OP_Network* net,
 int
 SOP_OpenVDB_From_Polygons::convertUnits()
 {
-    const bool toWSUnits = static_cast<bool>(evalInt("worldSpaceUnits", 0, 0));
+    const bool toWSUnits = static_cast<bool>(evalInt("useworldspaceunits", 0, 0));
     float width;
 
-    if (toWSUnits) {
-        width = static_cast<float>(evalInt("exteriorBandWidth", 0, 0));
-        setFloat("exteriorBandWidthWS", 0, 0, width * mVoxelSize);
+    float voxSize = 0.1f;
+#if VDB_COMPILABLE_SOP
+    // Attempt to extract the voxel size from our cache.
+    if (const auto* cache = dynamic_cast<SOP_OpenVDB_From_Polygons::Cache*>(myNodeVerbCache)) {
+        voxSize = cache->voxelSize();
+    }
+#else
+    voxSize = voxelSize();
+#endif
 
-        width = static_cast<float>(evalInt("interiorBandWidth", 0, 0));
-        setFloat("interiorBandWidthWS", 0, 0, width * mVoxelSize);
+    if (toWSUnits) {
+        width = static_cast<float>(evalInt("exteriorbandvoxels", 0, 0));
+        setFloat("exteriorband", 0, 0, width * voxSize);
+
+        width = static_cast<float>(evalInt("interiorbandvoxels", 0, 0));
+        setFloat("interiorband", 0, 0, width * voxSize);
         return 1;
     }
 
-    width = evalFloat("exteriorBandWidthWS", 0, 0);
-    int voxelWidth = std::max(static_cast<int>(width / mVoxelSize), 1);
-    setInt("exteriorBandWidth", 0, 0, voxelWidth);
+    width = static_cast<float>(evalFloat("exteriorband", 0, 0));
+    int voxelWidth = std::max(static_cast<int>(width / voxSize), 1);
+    setInt("exteriorbandvoxels", 0, 0, voxelWidth);
 
-    width = evalFloat("interiorBandWidthWS", 0, 0);
-    voxelWidth = std::max(static_cast<int>(width / mVoxelSize), 1);
-    setInt("interiorBandWidth", 0, 0, voxelWidth);
+    width = static_cast<float>(evalFloat("interiorband", 0, 0));
+    voxelWidth = std::max(static_cast<int>(width / voxSize), 1);
+    setInt("interiorbandvoxels", 0, 0, voxelWidth);
 
     return 1;
 }
@@ -492,33 +648,31 @@ SOP_OpenVDB_From_Polygons::convertUnits()
 
 ////////////////////////////////////////
 
+
 void
 SOP_OpenVDB_From_Polygons::resolveObsoleteParms(PRM_ParmList* obsoleteParms)
 {
     if (!obsoleteParms) return;
-    const fpreal time = CHgetEvalTime();
 
-    PRM_Parm* parm = obsoleteParms->getParmPtr("sdfGridName");
-
-    if (parm && !parm->isFactoryDefault()) {
-
-        UT_String gridNameStr;
-        obsoleteParms->evalString(gridNameStr, "sdfGridName", 0, time);
-
-        if (gridNameStr.length() > 0) {
-
-            if(bool(evalInt("fogVolume", 0, time))) {
-                setString(gridNameStr, CH_STRING_LITERAL, "fogVolumeGridName", 0, time);
-            } else {
-                setString(gridNameStr, CH_STRING_LITERAL, "distanceFieldGridName", 0, time);
-            }
-        }
-    }
+    //resolveRenamedParm(*obsoleteParms, "attrList", "numattrib");
+    resolveRenamedParm(*obsoleteParms, "distanceField", "builddistance");
+    resolveRenamedParm(*obsoleteParms, "distanceFieldGridName", "distancename");
+    resolveRenamedParm(*obsoleteParms, "fogVolume", "buildfog");
+    resolveRenamedParm(*obsoleteParms, "fogVolumeGridName", "fogname");
+    resolveRenamedParm(*obsoleteParms, "sizeOrCount", "sizeorcount");
+    resolveRenamedParm(*obsoleteParms, "voxelSize", "voxelsize");
+    resolveRenamedParm(*obsoleteParms, "voxelCount", "voxelcount");
+    resolveRenamedParm(*obsoleteParms, "worldSpaceUnits", "useworldspaceunits");
+    resolveRenamedParm(*obsoleteParms, "exteriorBandWidth", "exteriorbandvoxels");
+    resolveRenamedParm(*obsoleteParms, "interiorBandWidth", "interiorbandvoxels");
+    resolveRenamedParm(*obsoleteParms, "exteriorBandWidthWS", "exteriorband");
+    resolveRenamedParm(*obsoleteParms, "interiorBandWidthWS", "interiorband");
+    resolveRenamedParm(*obsoleteParms, "fillInterior", "fillinterior");
+    resolveRenamedParm(*obsoleteParms, "unsignedDist", "unsigneddist");
 
     // Delegate to the base class.
     hvdb::SOP_NodeVDB::resolveObsoleteParms(obsoleteParms);
 }
-
 
 
 ////////////////////////////////////////
@@ -535,42 +689,43 @@ SOP_OpenVDB_From_Polygons::updateParmsFlags()
 
     // Transform
     changed |= enableParm("group", refexists);
-    changed |= enableParm("voxelSize", !refexists);
 
     // Conversion
-    const bool wsUnits = bool(evalInt("worldSpaceUnits", 0, time));
-    const bool fillInterior = bool(evalInt("fillInterior", 0, time));
-    const bool unsignedDist = bool(evalInt("unsignedDist", 0, time));
+    const bool wsUnits = bool(evalInt("useworldspaceunits", 0, time));
+    const bool fillInterior = bool(evalInt("fillinterior", 0, time));
+    const bool unsignedDist = bool(evalInt("unsigneddist", 0, time));
 
-    changed |= enableParm("interiorBandWidth",
-        !wsUnits && !fillInterior && !unsignedDist);
+    // Voxel size or voxel count menu
+    const bool countMenu = (evalStdString("sizeorcount", time) != "worldVoxelSize");
+    changed |= setVisibleState("voxelsize", !countMenu);
+    changed |= setVisibleState("voxelcount", countMenu);
+    changed |= enableParm("voxelsize", !countMenu && !refexists);
+    changed |= enableParm("voxelcount", countMenu && !refexists);
 
-    changed |= enableParm("interiorBandWidthWS",
-        wsUnits && !fillInterior && !unsignedDist);
+    changed |= enableParm("interiorbandvoxels", !wsUnits && !fillInterior && !unsignedDist);
+    changed |= enableParm("exteriorband", wsUnits && !fillInterior && !unsignedDist);
+    changed |= enableParm("exteriorbandvoxels", !wsUnits);
+    changed |= enableParm("exteriorband", wsUnits);
 
-    changed |= enableParm("exteriorBandWidth", !wsUnits);
-    changed |= enableParm("exteriorBandWidthWS", wsUnits);
+    changed |= setVisibleState("interiorbandvoxels", !wsUnits);
+    changed |= setVisibleState("exteriorbandvoxels", !wsUnits);
+    changed |= setVisibleState("interiorband", wsUnits);
+    changed |= setVisibleState("exteriorband", wsUnits);
 
-    changed |= setVisibleState("interiorBandWidth", !wsUnits);
-    changed |= setVisibleState("exteriorBandWidth", !wsUnits);
-    changed |= setVisibleState("interiorBandWidthWS", wsUnits);
-    changed |= setVisibleState("exteriorBandWidthWS", wsUnits);
-
-    changed |= enableParm("fillInterior", !unsignedDist);
+    changed |= enableParm("fillinterior", !unsignedDist);
 
     // Output
-    changed |= enableParm("distanceFieldGridName", bool(evalInt("distanceField", 0, time)));
-    changed |= enableParm("fogVolumeGridName",
-        bool(evalInt("fogVolume", 0, time)) && !unsignedDist);
-    changed |= enableParm("fogVolume", !unsignedDist);
+    changed |= enableParm("distancename", bool(evalInt("builddistance", 0, time)));
+    changed |= enableParm("fogname", bool(evalInt("buildfog", 0, time)) && !unsignedDist);
+    changed |= enableParm("buildfog", !unsignedDist);
 
     // enable / diable vector type menu
     UT_String attrStr, attrName;
     GA_ROAttributeRef attrRef;
-    int attrClass;
+    int attrClass = POINT_ATTR;
     const GU_Detail* meshGdp = this->getInputLastGeo(0, time);
     if (meshGdp) {
-        for (int i = 1, N = evalInt("attrList", 0, time); i <= N; ++i) {
+        for (int i = 1, N = static_cast<int>(evalInt("attrList", 0, time)); i <= N; ++i) {
 
             evalStringInst("attribute#", &i, attrStr, 0, time);
             bool isVector = false;
@@ -614,11 +769,14 @@ SOP_OpenVDB_From_Polygons::updateParmsFlags()
 
 
 OP_ERROR
-SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_From_Polygons)::cookVDBSop(OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
         gdp->clearAndDestroy();
+#endif
+
         const fpreal time = context.getTime();
 
         hvdb::Interrupter boss("Converting geometry to volume");
@@ -628,7 +786,7 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
 
         const GU_Detail* inputGdp = inputGeo(0);
 
-        if (!inputGdp || !inputGdp->primitives().entries()) {
+        if (!inputGdp || !inputGdp->getNumPrimitives()) {
             addWarning(SOP_MESSAGE, "No mesh to convert");
             // We still create the grids as later workflow
             // may be able to handle an empty grid.
@@ -636,21 +794,20 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
 
         // Validate geometry
         std::string warningStr;
-        boost::shared_ptr<GU_Detail> geoPtr =
-            hvdb::validateGeometry(*inputGdp, warningStr, &boss);
-
+        auto geoPtr = hvdb::convertGeometry(*inputGdp, warningStr, &boss);
         if (geoPtr) {
             inputGdp = geoPtr.get();
             if (!warningStr.empty()) addWarning(SOP_MESSAGE, warningStr.c_str());
         }
 
-
         //////////
         // Evaluate the UI parameters.
 
-        const bool outputDistanceField = bool(evalInt("distanceField", 0, time));
-        const bool outputFogVolumeGrid = bool(evalInt("fogVolume", 0, time));
+        const bool outputDistanceField = bool(evalInt("builddistance", 0, time));
+        const bool unsignedDistanceFieldConversion = bool(evalInt("unsigneddist", 0, time));
+        const bool outputFogVolumeGrid = bool(evalInt("buildfog", 0, time));
         const bool outputAttributeGrid = bool(evalInt("attrList", 0, time) > 0);
+
 
         if (!outputDistanceField && !outputFogVolumeGrid && !outputAttributeGrid) {
 
@@ -658,42 +815,52 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
             return error();
         }
 
-        unsigned int conversionFlags = 0;
-        if (outputAttributeGrid) conversionFlags |= openvdb::tools::GENERATE_PRIM_INDEX_GRID;
-
-        mVoxelSize = evalFloat("voxelSize", 0, time);
         openvdb::math::Transform::Ptr transform;
 
         float inBand = std::numeric_limits<float>::max(), exBand = 0.0;
 
         const GU_Detail* refGdp = inputGeo(1);
-        bool secondinput = refGdp != NULL;
+        bool secondinput = refGdp != nullptr;
 
         if (secondinput) {
 
             // Get the first grid's transform
 
-            UT_String groupStr;
-            evalString(groupStr, "group", 0, time);
-
-            const GA_PrimitiveGroup *refGroup = matchGroup(const_cast<GU_Detail&>(*refGdp),
-                groupStr.toStdString());
+            const GA_PrimitiveGroup *refGroup = matchGroup(*refGdp, evalStdString("group", time));
 
             hvdb::VdbPrimCIterator gridIter(refGdp, refGroup);
 
             if (gridIter) {
                 transform = (*gridIter)->getGrid().transform().copy();
-                mVoxelSize = transform->voxelSize()[0];
+                mVoxelSize = static_cast<float>(transform->voxelSize()[0]);
                 ++gridIter;
             } else {
                  addError(SOP_MESSAGE, "Could not find a reference grid");
                 return error();
             }
 
-        } else {
+        } else {// derive the voxel size and define output grid's transform
+
+            UT_String str;
+            evalString(str, "sizeorcount", 0, time);
+            if ( str == "worldVoxelSize" ) {
+                mVoxelSize = static_cast<float>(evalFloat("voxelsize", 0, time));
+            } else {
+                const float dim = static_cast<float>(evalInt("voxelcount", 0, time));
+                UT_BoundingBox bbox;
+                inputGdp->getCachedBounds(bbox);
+                const float size = str == "countX" ? bbox.xsize() : str == "countY" ? bbox.ysize() :
+                                   str == "countZ" ? bbox.ysize() : bbox.sizeMax();
+                if ( evalInt("useworldspaceunits", 0, time) ) {
+                    const float w = static_cast<float>(evalFloat("exteriorband", 0, time));
+                    mVoxelSize = (size + 2.0f*w)/dim;
+                } else {
+                    const float w = static_cast<float>(evalInt("exteriorbandvoxels", 0, time));
+                    mVoxelSize = size/std::max(1.0f, dim - 2.0f*w);
+                }
+            }
             // Create a new transform
-            transform =
-                openvdb::math::Transform::createLinearTransform(mVoxelSize);
+            transform = openvdb::math::Transform::createLinearTransform(mVoxelSize);
         }
 
         if (mVoxelSize < 1e-5) {
@@ -705,13 +872,19 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
 
         // Set the narrow-band parameters
         {
-            const bool wsUnits = static_cast<bool>(evalInt("worldSpaceUnits", 0, time));
+            const bool wsUnits = static_cast<bool>(evalInt("useworldspaceunits", 0, time));
 
-            if (wsUnits) exBand = evalFloat("exteriorBandWidthWS", 0, time) / mVoxelSize;
-            else exBand = static_cast<float>(evalInt("exteriorBandWidth", 0, time));
-            if (!bool(evalInt("fillInterior", 0, time))) {
-                if (wsUnits) inBand = evalFloat("interiorBandWidthWS", 0, time) / mVoxelSize;
-                else inBand = static_cast<float>(evalInt("interiorBandWidth", 0, time));
+            if (wsUnits) {
+                exBand = static_cast<float>(evalFloat("exteriorband", 0, time) / mVoxelSize);
+            } else {
+                exBand = static_cast<float>(evalInt("exteriorbandvoxels", 0, time));
+            }
+            if (!bool(evalInt("fillinterior", 0, time))) {
+                if (wsUnits) {
+                    inBand = static_cast<float>(evalFloat("interiorband", 0, time) / mVoxelSize);
+                } else {
+                    inBand = static_cast<float>(evalInt("interiorbandvoxels", 0, time));
+                }
             }
         }
 
@@ -736,49 +909,48 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
         //////////
         // Mesh to volume conversion
 
-        openvdb::tools::MeshToVolume<openvdb::FloatGrid, hvdb::Interrupter>
-            converter(transform, conversionFlags, &boss);
 
-        const bool unsignedDist = bool(evalInt("unsignedDist", 0, time));
+        openvdb::tools::QuadAndTriangleDataAdapter<openvdb::Vec3s, openvdb::Vec4I>
+            mesh(pointList, primList);
 
-        if (!boss.wasInterrupted()) {
-            if (unsignedDist) {
-                converter.convertToUnsignedDistanceField(pointList, primList, exBand);
-            } else {
-                converter.convertToLevelSet(pointList, primList, exBand, inBand);
-            }
+        int conversionFlags = unsignedDistanceFieldConversion ?
+            openvdb::tools::UNSIGNED_DISTANCE_FIELD : 0;
+
+
+        openvdb::Int32Grid::Ptr primitiveIndexGrid;
+
+        if (outputAttributeGrid) {
+            primitiveIndexGrid.reset(new openvdb::Int32Grid(0));
         }
+
+        openvdb::FloatGrid::Ptr grid = openvdb::tools::meshToVolume<openvdb::FloatGrid>(
+            boss, mesh, *transform, exBand, inBand, conversionFlags, primitiveIndexGrid.get());
 
         //////////
         // Output
 
         // Distance field / level set
         if (!boss.wasInterrupted() && outputDistanceField) {
-            UT_String gridNameStr;
-            evalString(gridNameStr, "distanceFieldGridName", 0, time);
-            hvdb::createVdbPrimitive(*gdp, converter.distGridPtr(),
-                gridNameStr.toStdString().c_str());
+            hvdb::createVdbPrimitive(*gdp, grid, evalStdString("distancename", time).c_str());
         }
 
 
         // Fog volume
-        if (!boss.wasInterrupted() && outputFogVolumeGrid && !unsignedDist) {
+        if (!boss.wasInterrupted() && outputFogVolumeGrid && !unsignedDistanceFieldConversion) {
 
             // If no level set grid is exported the original level set
             // grid is modified in place.
             openvdb::FloatGrid::Ptr outputGrid;
 
             if (outputDistanceField) {
-                outputGrid = converter.distGridPtr()->deepCopy();
+                outputGrid = grid->deepCopy();
             } else {
-                outputGrid = converter.distGridPtr();
+                outputGrid = grid;
             }
 
             openvdb::tools::sdfToFogVolume(*outputGrid);
 
-            UT_String gridNameStr;
-            evalString(gridNameStr, "fogVolumeGridName", 0, time);
-            hvdb::createVdbPrimitive(*gdp, outputGrid, gridNameStr.toStdString().c_str());
+            hvdb::createVdbPrimitive(*gdp, outputGrid, evalStdString("fogname", time).c_str());
         }
 
         // Transfer mesh attributes
@@ -790,10 +962,10 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
 
             int closestPrimIndexInstance =
                 constructGenericAtttributeLists(pointAttributes, vertexAttributes,
-                    primitiveAttributes, *inputGdp, *converter.indexGridPtr(), time);
+                    primitiveAttributes, *inputGdp, *primitiveIndexGrid, float(time));
 
             transferAttributes(pointAttributes, vertexAttributes, primitiveAttributes,
-                *converter.indexGridPtr(), transform, *inputGdp);
+                *primitiveIndexGrid, transform, *inputGdp);
 
             // Export the closest prim idx grid.
             if (!boss.wasInterrupted() && closestPrimIndexInstance > -1) {
@@ -801,8 +973,8 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
                 evalStringInst("attributeGridName#", &closestPrimIndexInstance,
                     gridNameStr, 0, time);
                 if (gridNameStr.length() == 0) gridNameStr = "primitive_list_index";
-                hvdb::createVdbPrimitive(*gdp, converter.indexGridPtr(),
-                    gridNameStr.toStdString().c_str());
+                hvdb::createVdbPrimitive(
+                    *gdp, primitiveIndexGrid, gridNameStr.toStdString().c_str());
             }
         }
 
@@ -824,7 +996,7 @@ SOP_OpenVDB_From_Polygons::cookMySop(OP_Context& context)
 
 // Helper method constructs the attribute detail lists
 int
-SOP_OpenVDB_From_Polygons::constructGenericAtttributeLists(
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_From_Polygons)::constructGenericAtttributeLists(
     hvdb::AttributeDetailList &pointAttributes,
     hvdb::AttributeDetailList &vertexAttributes,
     hvdb::AttributeDetailList &primitiveAttributes,
@@ -835,11 +1007,11 @@ SOP_OpenVDB_From_Polygons::constructGenericAtttributeLists(
     UT_String attrStr, attrName;
     GA_ROAttributeRef attrRef;
     GA_Range range;
-    int attrClass;
+    int attrClass = POINT_ATTR;
     int closestPrimIndexInstance = -1;
 
     // for each selected attribute
-    for (int i = 1, N = evalInt("attrList", 0, time); i <= N; ++i) {
+    for (int i = 1, N = static_cast<int>(evalInt("attrList", 0, time)); i <= N; ++i) {
 
         evalStringInst("attribute#", &i, attrStr, 0, time);
 
@@ -852,7 +1024,7 @@ SOP_OpenVDB_From_Polygons::constructGenericAtttributeLists(
             continue;
         }
 
-        hvdb::AttributeDetailList *attributeList;
+        hvdb::AttributeDetailList* attributeList = nullptr;
 
         if (attrClass == POINT_ATTR) {
             attrRef = meshGdp.findPointAttribute(attrName);
@@ -881,7 +1053,7 @@ SOP_OpenVDB_From_Polygons::constructGenericAtttributeLists(
 
         evalStringInst("attributeGridName#", &i, attrStr, 0, time);
         std::string customName = attrStr.toStdString();
-        int vecType = evalIntInst("vecType#", &i, 0, time);
+        int vecType = static_cast<int>(evalIntInst("vecType#", &i, 0, time));
 
 
         const GA_Attribute *attr = attrRef.getAttribute();
@@ -962,9 +1134,9 @@ SOP_OpenVDB_From_Polygons::constructGenericAtttributeLists(
 ////////////////////////////////////////
 
 
-template <class ValueType>
+template<class ValueType>
 void
-SOP_OpenVDB_From_Polygons::addAttributeDetails(
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_From_Polygons)::addAttributeDetails(
     hvdb::AttributeDetailList &attributeList,
     const GA_Attribute *attribute,
     const GA_AIFTuple *tupleAIF,
@@ -973,12 +1145,10 @@ SOP_OpenVDB_From_Polygons::addAttributeDetails(
     std::string& customName,
     int vecType)
 {
-
     // Defines a new type of a tree having the same hierarchy as the incoming
     // Int32Grid's tree but potentially a different value type.
-    typedef typename openvdb::Int32Grid::TreeType::ValueConverter<ValueType>::Type TreeType;
-    typedef typename openvdb::Grid<TreeType> GridType;
-
+    using TreeType = typename openvdb::Int32Grid::TreeType::ValueConverter<ValueType>::Type;
+    using GridType = typename openvdb::Grid<TreeType>;
 
     if (vecType != -1) { // Vector grid
          // Get the attribute's default value.
@@ -1029,7 +1199,7 @@ SOP_OpenVDB_From_Polygons::addAttributeDetails(
 
 
 void
-SOP_OpenVDB_From_Polygons::transferAttributes(
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_From_Polygons)::transferAttributes(
     hvdb::AttributeDetailList &pointAttributes,
     hvdb::AttributeDetailList &vertexAttributes,
     hvdb::AttributeDetailList &primitiveAttributes,
@@ -1066,6 +1236,6 @@ SOP_OpenVDB_From_Polygons::transferAttributes(
     }
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

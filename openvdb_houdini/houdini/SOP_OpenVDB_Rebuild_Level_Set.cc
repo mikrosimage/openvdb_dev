@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -44,10 +44,30 @@
 #include <PRM/PRM_Parm.h>
 #include <PRM/PRM_SharedFunc.h>
 
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#if UT_VERSION_INT >= 0x10050000 // 16.5.0 or later
+#include <hboost/algorithm/string/join.hpp>
+#else
 #include <boost/algorithm/string/join.hpp>
+#endif
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
+
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
+#if UT_VERSION_INT < 0x10050000 // earlier than 16.5.0
+namespace hboost = boost;
+#endif
 
 
 ////////////////////////////////////////
@@ -57,14 +77,20 @@ class SOP_OpenVDB_Rebuild_Level_Set: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Rebuild_Level_Set(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Rebuild_Level_Set() {};
+    ~SOP_OpenVDB_Rebuild_Level_Set() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions { OP_ERROR cookVDBSop(OP_Context&) override; };
+#else
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
-    virtual void resolveObsoleteParms(PRM_ParmList*);
+    OP_ERROR cookVDBSop(OP_Context&) override;
+#endif
+
+protected:
+    bool updateParmsFlags() override;
+    void resolveObsoleteParms(PRM_ParmList*) override;
 };
 
 
@@ -75,7 +101,7 @@ protected:
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     //////////
     // Conversion settings
@@ -83,34 +109,57 @@ newSopOperator(OP_OperatorTable* table)
     hutil::ParmList parms;
 
     parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setHelpText(
-            "Specify a subset of the input VDB grids to be processed\n"
-            "(scalar, floating-point grids only)"));
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Specify a subset of the input VDB grids to be processed\n"
+            "(scalar, floating-point grids only)")
+        .setDocumentation(
+            "A subset of the scalar, floating-point input VDBs to be processed"
+            " (see [specifying volumes|/model/volumes#group])"));
 
     parms.add(hutil::ParmFactory(PRM_FLT_J, "isovalue", "Isovalue")
         .setRange(PRM_RANGE_UI, -1, PRM_RANGE_UI, 1)
-        .setHelpText("The isovalue that defines the implicit surface"));
+        .setTooltip("The isovalue that defines the implicit surface"));
 
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "worldunits", "Use World Space Units")
+        .setTooltip("If enabled, specify the width of the narrow band in world units."));
 
-    // Narrow-band width {
+    // Voxel unit narrow-band width {
     parms.add(hutil::ParmFactory(PRM_FLT_J, "exteriorBandWidth", "Exterior Band Voxels")
         .setDefault(PRMthreeDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 10)
-        .setHelpText("Specify the width of the exterior (d >= 0) portion of the narrow band. "
-            "(3 voxel units is optimal for level set operations.)"));
+        .setTooltip("Specify the width of the exterior (distance >= 0) portion of the narrow band. "
+            "(3 voxel units is optimal for level set operations.)")
+        .setDocumentation(nullptr));
 
     parms.add(hutil::ParmFactory(PRM_FLT_J, "interiorBandWidth", "Interior Band Voxels")
         .setDefault(PRMthreeDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 10)
-        .setHelpText("Specify the width of the interior (d < 0) portion of the narrow band. "
-            "(3 voxel units is optimal for level set operations.)"));
+        .setTooltip("Specify the width of the interior (distance < 0) portion of the narrow band. "
+            "(3 voxel units is optimal for level set operations.)")
+        .setDocumentation(nullptr));
+    // }
+
+    // World unit narrow-band width {
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "exteriorBandWidthWS", "Exterior Band")
+        .setDefault(0.1)
+        .setRange(PRM_RANGE_RESTRICTED, 1e-5, PRM_RANGE_UI, 10)
+        .setTooltip("Specify the width of the exterior (distance >= 0) portion of the narrow band.")
+        .setDocumentation(
+            "Specify the width of the exterior (_distance_ => 0) portion of the narrow band."));
+
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "interiorBandWidthWS",  "Interior Band")
+        .setDefault(0.1)
+        .setRange(PRM_RANGE_RESTRICTED, 1e-5, PRM_RANGE_UI, 10)
+        .setTooltip("Specify the width of the interior (distance < 0) portion of the narrow band.")
+        .setDocumentation(
+            "Specify the width of the interior (_distance_ < 0) portion of the narrow band."));
     // }
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "fillinterior", "Fill Interior")
-        .setHelpText("Extract signed distances for all interior voxels, this "
-            "operation is going to densify the interior of the model. "
-            "Requires a closed watertight model."));
+        .setTooltip(
+            "If enabled, extract signed distances for all interior voxels.\n\n"
+            "This operation densifies the interior of the surface and requires"
+            " a closed, watertight surface."));
 
     //////////
     // Obsolete parameters
@@ -126,7 +175,35 @@ newSopOperator(OP_OperatorTable* table)
     hvdb::OpenVDBOpFactory("OpenVDB Rebuild Level Set",
         SOP_OpenVDB_Rebuild_Level_Set::factory, parms, *table)
         .setObsoleteParms(obsoleteParms)
-        .addInput("VDB grids to process");
+        .addInput("VDB grids to process")
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE,
+            []() { return new SOP_OpenVDB_Rebuild_Level_Set::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Repair level sets represented by VDB volumes.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+Certain operations on a level set volume can cause the signed distances\n\
+to its zero crossing to become invalid.\n\
+This node restores proper distances by surfacing the level set with\n\
+a polygon mesh and then converting the mesh back to a level set.\n\
+As such, it can repair more badly damaged level sets than can the\n\
+[OpenVDB Renormalize Level Set|Node:sop/DW_OpenVDBRenormalizeLevelSet] node.\n\
+\n\
+@related\n\
+- [OpenVDB Offset Level Set|Node:sop/DW_OpenVDBOffsetLevelSet]\n\
+- [OpenVDB Renormalize Level Set|Node:sop/DW_OpenVDBRenormalizeLevelSet]\n\
+- [OpenVDB Smooth Level Set|Node:sop/DW_OpenVDBSmoothLevelSet]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -179,8 +256,17 @@ SOP_OpenVDB_Rebuild_Level_Set::updateParmsFlags()
 {
     bool changed = false;
 
-    const bool fillinterior = bool(evalInt("fillinterior", 0, 0));
-    changed |= enableParm("interiorBandWidth", !fillinterior);
+    const bool fillInterior = bool(evalInt("fillinterior", 0, 0));
+    changed |= enableParm("interiorBandWidth", !fillInterior);
+    changed |= enableParm("interiorBandWidthWS", !fillInterior);
+
+    const bool worldUnits = bool(evalInt("worldunits", 0, 0));
+
+    changed |= setVisibleState("interiorBandWidth", !worldUnits);
+    changed |= setVisibleState("interiorBandWidthWS", worldUnits);
+
+    changed |= setVisibleState("exteriorBandWidth", !worldUnits);
+    changed |= setVisibleState("exteriorBandWidthWS", worldUnits);
 
     return changed;
 }
@@ -190,27 +276,37 @@ SOP_OpenVDB_Rebuild_Level_Set::updateParmsFlags()
 
 
 OP_ERROR
-SOP_OpenVDB_Rebuild_Level_Set::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Rebuild_Level_Set)::cookVDBSop(
+    OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
-        const fpreal time = context.getTime();
 
         // This does a deep copy of native Houdini primitives
         // but only a shallow copy of VDB grids.
         duplicateSource(0, context);
+#endif
+
+        const fpreal time = context.getTime();
 
         // Get the group of grids to process.
-        UT_String groupStr;
-        evalString(groupStr, "group", 0, time);
-        const GA_PrimitiveGroup* group = this->matchGroup(*gdp, groupStr.toStdString());
+        const GA_PrimitiveGroup* group = this->matchGroup(*gdp, evalStdString("group", time));
 
         // Get other UI parameters.
-        const float exBandWidth = evalFloat("exteriorBandWidth", 0, time);
-        const float inBandWidth = bool(evalInt("fillinterior", 0, time)) ?
-            std::numeric_limits<float>::max() : evalFloat("interiorBandWidth", 0, time);
 
-        const float iso = evalFloat("isovalue", 0, time);
+        const bool fillInterior = bool(evalInt("fillinterior", 0, time));
+        const bool worldUnits = bool(evalInt("worldunits", 0, time));
+
+        float exBandWidthVoxels = float(evalFloat("exteriorBandWidth", 0, time));
+        float inBandWidthVoxels = fillInterior ? std::numeric_limits<float>::max() :
+                                    float(evalFloat("interiorBandWidth", 0, time));
+
+        float exBandWidthWorld = float(evalFloat("exteriorBandWidthWS", 0, time));
+        float inBandWidthWorld = fillInterior ? std::numeric_limits<float>::max() :
+                                    float(evalFloat("interiorBandWidthWS", 0, time));
+
+        const float iso = float(evalFloat("isovalue", 0, time));
 
         hvdb::Interrupter boss("Rebuilding Level Set Grids");
 
@@ -223,15 +319,44 @@ SOP_OpenVDB_Rebuild_Level_Set::cookMySop(OP_Context& context)
 
             GU_PrimVDB* vdbPrim = *it;
 
+            float exWidth = exBandWidthVoxels, inWidth = inBandWidthVoxels;
+
+            if (worldUnits) {
+                const float voxelSize = float(vdbPrim->getGrid().voxelSize()[0]);
+
+                exWidth = exBandWidthWorld / voxelSize;
+                if (!fillInterior) inWidth = inBandWidthWorld / voxelSize;
+
+                if (exWidth < 1.0f || inWidth < 1.0f) {
+                    exWidth = std::max(exWidth, 1.0f);
+                    inWidth = std::max(inWidth, 1.0f);
+                    std::string s = it.getPrimitiveNameOrIndex().toStdString();
+                    s += " - band width is smaller than one voxel.";
+                    addWarning(SOP_MESSAGE, s.c_str());
+                }
+            }
+
             // Process floating point grids.
+
             if (vdbPrim->getStorageType() == UT_VDB_FLOAT) {
+
                 openvdb::FloatGrid& grid = UTvdbGridCast<openvdb::FloatGrid>(vdbPrim->getGrid());
+
                 vdbPrim->setGrid(*openvdb::tools::levelSetRebuild(
-                    grid, iso, exBandWidth, inBandWidth, /*xform=*/NULL, &boss));
+                    grid, iso, exWidth, inWidth, /*xform=*/nullptr, &boss));
+
+                const GEO_VolumeOptions& visOps = vdbPrim->getVisOptions();
+                vdbPrim->setVisualization(GEO_VOLUMEVIS_ISO, visOps.myIso, visOps.myDensity);
+
             } else if (vdbPrim->getStorageType() == UT_VDB_DOUBLE) {
+
                 openvdb::DoubleGrid& grid = UTvdbGridCast<openvdb::DoubleGrid>(vdbPrim->getGrid());
+
                 vdbPrim->setGrid(*openvdb::tools::levelSetRebuild(
-                    grid, iso, exBandWidth, inBandWidth, /*xform=*/NULL, &boss));
+                    grid, iso, exWidth, inWidth, /*xform=*/nullptr, &boss));
+
+                const GEO_VolumeOptions& visOps = vdbPrim->getVisOptions();
+                vdbPrim->setVisualization(GEO_VOLUMEVIS_ISO, visOps.myIso, visOps.myDensity);
             } else {
                 skippedGrids.push_back(it.getPrimitiveNameOrIndex().toStdString());
             }
@@ -239,7 +364,7 @@ SOP_OpenVDB_Rebuild_Level_Set::cookMySop(OP_Context& context)
 
         if (!skippedGrids.empty()) {
             std::string s = "The following non-floating-point grids were skipped: " +
-                boost::algorithm::join(skippedGrids, ", ") + ".";
+                hboost::algorithm::join(skippedGrids, ", ") + ".";
             addWarning(SOP_MESSAGE, s.c_str());
         }
 
@@ -255,6 +380,6 @@ SOP_OpenVDB_Rebuild_Level_Set::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

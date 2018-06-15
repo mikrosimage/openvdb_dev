@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -59,9 +59,9 @@ void TestAll()
 {
     CPPUNIT_ASSERT(MaskType::memUsage() == MaskType::SIZE/8);
     const Index SIZE = MaskType::SIZE > 512 ? 512 : MaskType::SIZE;
-    
+
     {// default constructor
-        MaskType m;//all bits are off    
+        MaskType m;//all bits are off
         for (Index i=0; i<SIZE; ++i) CPPUNIT_ASSERT(m.isOff(i));
         for (Index i=0; i<SIZE; ++i) CPPUNIT_ASSERT(!m.isOn(i));
         CPPUNIT_ASSERT(m.isOff());
@@ -150,6 +150,23 @@ void TestAll()
             CPPUNIT_ASSERT(m.countOn() == MaskType::SIZE);
         }
     }
+    {// isConstant
+        MaskType m(true);//all bits are on
+        bool isOn = false;
+        CPPUNIT_ASSERT(!m.isOff());
+        CPPUNIT_ASSERT(m.isOn());
+        CPPUNIT_ASSERT(m.isConstant(isOn));
+        CPPUNIT_ASSERT(isOn);
+        m.setOff(MaskType::SIZE-1);//sets last bit off
+        CPPUNIT_ASSERT(!m.isOff());
+        CPPUNIT_ASSERT(!m.isOn());
+        CPPUNIT_ASSERT(!m.isConstant(isOn));
+        m.setOff();//sets all bits off
+        CPPUNIT_ASSERT(m.isOff());
+        CPPUNIT_ASSERT(!m.isOn());
+        CPPUNIT_ASSERT(m.isConstant(isOn));
+        CPPUNIT_ASSERT(!isOn);
+    }
     {// DenseIterator
         MaskType m(false);
         for (Index i=0; i<SIZE; ++i) {
@@ -167,6 +184,6 @@ void TestAll()
 
 
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

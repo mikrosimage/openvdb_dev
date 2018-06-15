@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -36,21 +36,61 @@
 #define OPENVDB_PYGRID_HAS_BEEN_INCLUDED
 
 #include <boost/python.hpp>
-#include <boost/type_traits/remove_const.hpp>
+#ifndef DWA_BOOST_VERSION
+#include <boost/version.hpp>
+#define DWA_BOOST_VERSION (10 * BOOST_VERSION)
+#endif
 #ifdef PY_OPENVDB_USE_NUMPY
-#include <arrayobject.h> // for PyArray_DATA()
+  #if DWA_BOOST_VERSION >= 1065000
+    // boost::python::numeric was replaced with boost::python::numpy in Boost 1.65.
+    // (boost::python::numpy requires NumPy 1.7 or later.)
+    #include <boost/python/numpy.hpp>
+    //#include <arrayobject.h> // for PyArray_Descr (see pyGrid::arrayTypeId())
+    #define PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+  #else
+    #define PY_ARRAY_UNIQUE_SYMBOL PY_OPENVDB_ARRAY_API
+    #define NO_IMPORT_ARRAY // NumPy gets initialized during module initialization
+    #include <numpyconfig.h>
+    #ifdef NPY_1_7_API_VERSION
+      #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+    #endif
+    #include <arrayobject.h> // for PyArrayObject
+  #endif
+  #include "openvdb/tools/MeshToVolume.h"
+  #include "openvdb/tools/VolumeToMesh.h" // for tools::volumeToMesh()
 #endif
 #include "openvdb/openvdb.h"
 #include "openvdb/io/Stream.h"
+#include "openvdb/math/Math.h" // for math::isExactlyEqual()
 #include "openvdb/tools/LevelSetSphere.h"
 #include "openvdb/tools/Dense.h"
+#include "openvdb/tools/ChangeBackground.h"
+#include "openvdb/tools/Prune.h"
+#include "openvdb/tools/SignedFloodFill.h"
 #include "pyutil.h"
 #include "pyAccessor.h" // for pyAccessor::AccessorWrap
 #include "pyopenvdb.h"
+#include <algorithm> // for std::max()
+#include <cstring> // for memcpy()
+#include <iostream>
+#include <memory>
 #include <sstream>
+#include <string>
+#include <vector>
 
 namespace py = boost::python;
+
+#ifdef __clang__
+// This is a private header, so it's OK to include a "using namespace" directive.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wheader-hygiene"
+#endif
+
 using namespace openvdb::OPENVDB_VERSION_NAME;
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 
 namespace pyopenvdb {
@@ -170,7 +210,7 @@ extractValueArg(
     py::object obj,
     const char* functionName,
     int argIdx = 0, // args are numbered starting from 1
-    const char* expectedType = NULL)
+    const char* expectedType = nullptr)
 {
     return pyutil::extractArg<T>(obj,
         functionName, pyutil::GridTraits<GridType>::name(), argIdx, expectedType);
@@ -185,7 +225,7 @@ extractValueArg(
     py::object obj,
     const char* functionName,
     int argIdx = 0, // args are numbered starting from 1
-    const char* expectedType = NULL)
+    const char* expectedType = nullptr)
 {
     return extractValueArg<GridType, typename GridType::ValueType>(
         obj, functionName, argIdx, expectedType);
@@ -197,7 +237,7 @@ extractValueArg(
 
 template<typename GridType>
 inline typename GridType::Ptr
-copyGrid(const GridType& grid)
+copyGrid(GridType& grid)
 {
     return grid.copy();
 }
@@ -239,7 +279,7 @@ template<typename GridType>
 inline typename GridType::ValueType
 getOneValue()
 {
-    typedef typename GridType::ValueType ValueT;
+    using ValueT = typename GridType::ValueType;
     return ValueT(openvdb::zeroVal<ValueT>() + 1);
 }
 
@@ -264,7 +304,7 @@ template<typename GridType>
 inline void
 setGridBackground(GridType& grid, py::object obj)
 {
-    grid.setBackground(extractValueArg<GridType>(obj, "setBackground"));
+    tools::changeBackground(grid.tree(), extractValueArg<GridType>(obj, "setBackground"));
 }
 
 
@@ -276,7 +316,7 @@ setGridName(GridBase::Ptr grid, py::object strObj)
             grid->removeMeta(GridBase::META_GRID_NAME);
         } else {
             const std::string name = pyutil::extractArg<std::string>(
-                strObj, "setName", /*className=*/NULL, /*argIdx=*/1, "str");
+                strObj, "setName", /*className=*/nullptr, /*argIdx=*/1, "str");
             grid->setName(name);
         }
     }
@@ -291,7 +331,7 @@ setGridCreator(GridBase::Ptr grid, py::object strObj)
             grid->removeMeta(GridBase::META_GRID_CREATOR);
         } else {
             const std::string name = pyutil::extractArg<std::string>(
-                strObj, "setCreator", /*className=*/NULL, /*argIdx=*/1, "str");
+                strObj, "setCreator", /*className=*/nullptr, /*argIdx=*/1, "str");
             grid->setCreator(name);
         }
     }
@@ -312,7 +352,7 @@ setGridClass(GridBase::Ptr grid, py::object strObj)
         grid->clearGridClass();
     } else {
         const std::string name = pyutil::extractArg<std::string>(
-            strObj, "setGridClass", /*className=*/NULL, /*argIdx=*/1, "str");
+            strObj, "setGridClass", /*className=*/nullptr, /*argIdx=*/1, "str");
         grid->setGridClass(GridBase::stringToGridClass(name));
     }
 }
@@ -332,7 +372,7 @@ setVecType(GridBase::Ptr grid, py::object strObj)
         grid->clearVectorType();
     } else {
         const std::string name = pyutil::extractArg<std::string>(
-            strObj, "setVectorType", /*className=*/NULL, /*argIdx=*/1, "str");
+            strObj, "setVectorType", /*className=*/nullptr, /*argIdx=*/1, "str");
         grid->setVectorType(GridBase::stringToVecType(name));
     }
 }
@@ -355,7 +395,7 @@ setGridTransform(GridBase::Ptr grid, py::object xformObj)
 {
     if (grid) {
         if (math::Transform::Ptr xform = pyutil::extractArg<math::Transform::Ptr>(
-            xformObj, "setTransform", /*className=*/NULL, /*argIdx=*/1, "Transform"))
+            xformObj, "setTransform", /*className=*/nullptr, /*argIdx=*/1, "Transform"))
         {
             grid->setTransform(xform);
         } else {
@@ -374,7 +414,7 @@ setGridTransform(GridBase::Ptr grid, py::object xformObj)
 template<typename GridType>
 struct AccessorHelper
 {
-    typedef typename pyAccessor::AccessorWrap<GridType> Wrapper;
+    using Wrapper = typename pyAccessor::AccessorWrap<GridType>;
     static Wrapper wrap(typename GridType::Ptr grid)
     {
         if (!grid) {
@@ -389,7 +429,7 @@ struct AccessorHelper
 template<typename GridType>
 struct AccessorHelper<const GridType>
 {
-    typedef typename pyAccessor::AccessorWrap<const GridType> Wrapper;
+    using Wrapper = typename pyAccessor::AccessorWrap<const GridType>;
     static Wrapper wrap(typename GridType::ConstPtr grid)
     {
         if (!grid) {
@@ -582,7 +622,15 @@ getStatsMetadata(GridBase::ConstPtr grid)
 inline py::object
 getMetadataKeys(GridBase::ConstPtr grid)
 {
-    if (grid) return py::dict(static_cast<const MetaMap&>(*grid)).iterkeys();
+    if (grid) {
+#if PY_MAJOR_VERSION >= 3
+        // Return an iterator over the "keys" view of a dict.
+        return py::import("builtins").attr("iter")(
+            py::dict(static_cast<const MetaMap&>(*grid)).keys());
+#else
+        return py::dict(static_cast<const MetaMap&>(*grid)).iterkeys();
+#endif
+    }
     return py::object();
 }
 
@@ -593,7 +641,7 @@ getMetadata(GridBase::ConstPtr grid, py::object nameObj)
     if (!grid) return py::object();
 
     const std::string name = pyutil::extractArg<std::string>(
-        nameObj, "__getitem__", NULL, /*argIdx=*/1, "str");
+        nameObj, "__getitem__", nullptr, /*argIdx=*/1, "str");
 
     Metadata::ConstPtr metadata = (*grid)[name];
     if (!metadata) {
@@ -617,7 +665,7 @@ setMetadata(GridBase::Ptr grid, py::object nameObj, py::object valueObj)
     if (!grid) return;
 
     const std::string name = pyutil::extractArg<std::string>(
-        nameObj, "__setitem__", NULL, /*argIdx=*/1, "str");
+        nameObj, "__setitem__", nullptr, /*argIdx=*/1, "str");
 
     // Insert the Python object into a Python dict, then use the dict-to-MetaMap
     // converter (see pyOpenVDBModule.cc) to convert the dict to a MetaMap
@@ -652,7 +700,7 @@ removeMetadata(GridBase::Ptr grid, const std::string& name)
 inline bool
 hasMetadata(GridBase::ConstPtr grid, const std::string& name)
 {
-    if (grid) return ((*grid)[name].get() != NULL);
+    if (grid) return ((*grid)[name].get() != nullptr);
     return false;
 }
 
@@ -664,7 +712,7 @@ template<typename GridType>
 inline void
 prune(GridType& grid, py::object tolerance)
 {
-    grid.tree().prune(extractValueArg<GridType>(tolerance, "prune"));
+    tools::prune(grid.tree(), extractValueArg<GridType>(tolerance, "prune"));
 }
 
 
@@ -673,9 +721,10 @@ inline void
 pruneInactive(GridType& grid, py::object valObj)
 {
     if (valObj.is_none()) {
-        grid.tree().pruneInactive();
+        tools::pruneInactive(grid.tree());
     } else {
-        grid.tree().pruneInactive(extractValueArg<GridType>(valObj, "pruneInactive"));
+        tools::pruneInactiveWithValue(
+            grid.tree(), extractValueArg<GridType>(valObj, "pruneInactive"));
     }
 }
 
@@ -696,7 +745,7 @@ template<typename GridType>
 inline void
 signedFloodFill(GridType& grid)
 {
-    grid.signedFloodFill();
+    tools::signedFloodFill(grid.tree());
 }
 
 
@@ -723,16 +772,174 @@ copyToArray(GridType&, const py::object&, py::object)
 
 #else // if defined(PY_OPENVDB_USE_NUMPY)
 
-template<int TypeNum> struct NumPyToCpp {};
-//template<> struct NumPyToCpp<NPY_HALF>   { typedef half type; };
-template<> struct NumPyToCpp<NPY_FLOAT>  { typedef float type; };
-template<> struct NumPyToCpp<NPY_DOUBLE> { typedef double type; };
-template<> struct NumPyToCpp<NPY_BOOL>   { typedef bool type; };
-template<> struct NumPyToCpp<NPY_INT16>  { typedef Int16 type; };
-template<> struct NumPyToCpp<NPY_INT32>  { typedef Int32 type; };
-template<> struct NumPyToCpp<NPY_INT64>  { typedef Int64 type; };
-template<> struct NumPyToCpp<NPY_UINT32> { typedef Index32 type; };
-template<> struct NumPyToCpp<NPY_UINT64> { typedef Index64 type; };
+using ArrayDimVec = std::vector<size_t>;
+
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+// ID numbers for supported value types
+enum class DtId { NONE, FLOAT, DOUBLE, BOOL, INT16, INT32, INT64, UINT32, UINT64/*, HALF*/ };
+
+using NumPyArrayType = py::numpy::ndarray;
+
+#else // if !defined PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+// NumPy type numbers for supported value types
+enum class DtId {
+    NONE =   NPY_NOTYPE,
+    FLOAT =  NPY_FLOAT,
+    DOUBLE = NPY_DOUBLE,
+    BOOL =   NPY_BOOL,
+    INT16 =  NPY_INT16,
+    INT32 =  NPY_INT32,
+    INT64 =  NPY_INT64,
+    UINT32 = NPY_UINT32,
+    UINT64 = NPY_UINT64,
+    //HALF =   NPY_HALF
+};
+
+using NumPyArrayType = py::numeric::array;
+
+#endif // PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+
+template<DtId TypeId> struct NumPyToCpp {};
+template<> struct NumPyToCpp<DtId::FLOAT>  { using type = float; };
+template<> struct NumPyToCpp<DtId::DOUBLE> { using type = double; };
+template<> struct NumPyToCpp<DtId::BOOL>   { using type = bool; };
+template<> struct NumPyToCpp<DtId::INT16>  { using type = Int16; };
+template<> struct NumPyToCpp<DtId::INT32>  { using type = Int32; };
+template<> struct NumPyToCpp<DtId::INT64>  { using type = Int64; };
+template<> struct NumPyToCpp<DtId::UINT32> { using type = Index32; };
+template<> struct NumPyToCpp<DtId::UINT64> { using type = Index64; };
+//template<> struct NumPyToCpp<DtId::HALF>   { using type = half; };
+
+
+#if 0
+template<typename T> struct CppToNumPy { static const DtId typeId = DtId::NONE; };
+template<> struct CppToNumPy<float>    { static const DtId typeId = DtId::FLOAT; };
+template<> struct CppToNumPy<double>   { static const DtId typeId = DtId::DOUBLE; };
+template<> struct CppToNumPy<bool>     { static const DtId typeId = DtId::BOOL; };
+template<> struct CppToNumPy<Int16>    { static const DtId typeId = DtId::INT16; };
+template<> struct CppToNumPy<Int32>    { static const DtId typeId = DtId::INT32; };
+template<> struct CppToNumPy<Int64>    { static const DtId typeId = DtId::INT64; };
+template<> struct CppToNumPy<Index32>  { static const DtId typeId = DtId::UINT32; };
+template<> struct CppToNumPy<Index64>  { static const DtId typeId = DtId::UINT64; };
+//template<> struct CppToNumPy<half>     { static const DtId typeId = DtId::HALF; };
+#endif
+
+
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+// Return the ID number of the given NumPy array's data type.
+/// @todo Revisit this if and when py::numpy::dtype ever provides a type number accessor.
+inline DtId
+arrayTypeId(const py::numpy::ndarray& arrayObj)
+{
+    namespace np = py::numpy;
+    const auto dtype = arrayObj.get_dtype();
+#if 0
+    // More efficient than np::equivalent(), but requires NumPy headers.
+    if (const auto* descr = reinterpret_cast<const PyArray_Descr*>(dtype.ptr())) {
+        const auto typeId = static_cast<DtId>(descr->type_num);
+        switch (typeId) {
+            case DtId::NONE: break;
+            case DtId::FLOAT: case DtId::DOUBLE: case DtId::BOOL:
+            case DtId::INT16: case DtId::INT32: case DtId::INT64:
+            case DtId::UINT32: case DtId::UINT64:
+                return typeId;
+        }
+        throw openvdb::TypeError{};
+    }
+#else
+    if (np::equivalent(dtype, np::dtype::get_builtin<float>())) return DtId::FLOAT;
+    if (np::equivalent(dtype, np::dtype::get_builtin<double>())) return DtId::DOUBLE;
+    if (np::equivalent(dtype, np::dtype::get_builtin<bool>())) return DtId::BOOL;
+    if (np::equivalent(dtype, np::dtype::get_builtin<Int16>())) return DtId::INT16;
+    if (np::equivalent(dtype, np::dtype::get_builtin<Int32>())) return DtId::INT32;
+    if (np::equivalent(dtype, np::dtype::get_builtin<Int64>())) return DtId::INT64;
+    if (np::equivalent(dtype, np::dtype::get_builtin<Index32>())) return DtId::UINT32;
+    if (np::equivalent(dtype, np::dtype::get_builtin<Index64>())) return DtId::UINT64;
+    //if (np::equivalent(dtype, np::dtype::get_builtin<half>())) return DtId::HALF;
+#endif
+    throw openvdb::TypeError{};
+}
+
+
+// Return a string description of the given NumPy array's data type.
+inline std::string
+arrayTypeName(const py::numpy::ndarray& arrayObj)
+{
+    return pyutil::str(arrayObj.get_dtype());
+}
+
+
+// Return the dimensions of the given NumPy array.
+inline ArrayDimVec
+arrayDimensions(const py::numpy::ndarray& arrayObj)
+{
+    ArrayDimVec dims;
+    for (int i = 0, N = arrayObj.get_nd(); i < N; ++i) {
+        dims.push_back(static_cast<size_t>(arrayObj.shape(i)));
+    }
+    return dims;
+}
+
+#else // !defined PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+// Return the ID number of the given NumPy array's data type.
+inline DtId
+arrayTypeId(const py::numeric::array& arrayObj)
+{
+    const PyArray_Descr* dtype = nullptr;
+    if (PyArrayObject* arrayObjPtr = reinterpret_cast<PyArrayObject*>(arrayObj.ptr())) {
+        dtype = PyArray_DESCR(arrayObjPtr);
+    }
+    if (dtype) return static_cast<DtId>(dtype->type_num);
+    throw openvdb::TypeError{};
+}
+
+
+// Return a string description of the given NumPy array's data type.
+inline std::string
+arrayTypeName(const py::numeric::array& arrayObj)
+{
+    std::string name;
+    if (PyObject_HasAttrString(arrayObj.ptr(), "dtype")) {
+        name = pyutil::str(arrayObj.attr("dtype"));
+    } else {
+        name = "'_'";
+        PyArrayObject* arrayObjPtr = reinterpret_cast<PyArrayObject*>(arrayObj.ptr());
+        name[1] = PyArray_DESCR(arrayObjPtr)->kind;
+    }
+    return name;
+}
+
+
+// Return the dimensions of the given NumPy array.
+inline ArrayDimVec
+arrayDimensions(const py::numeric::array& arrayObj)
+{
+    const py::object shape = arrayObj.attr("shape");
+    ArrayDimVec dims;
+    for (long i = 0, N = py::len(shape); i < N; ++i) {
+        dims.push_back(py::extract<size_t>(shape[i]));
+    }
+    return dims;
+}
+
+
+inline py::object
+copyNumPyArray(PyArrayObject* arrayObj, NPY_ORDER order = NPY_CORDER)
+{
+#ifdef __GNUC__
+    // Silence GCC "casting between pointer-to-function and pointer-to-object" warnings.
+    __extension__
+#endif
+    auto obj = pyutil::pyBorrow(PyArray_NewCopy(arrayObj, order));
+    return obj;
+}
+
+#endif // PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
 
 
 // Abstract base class for helper classes that copy data between
@@ -741,7 +948,7 @@ template<typename GridType>
 class CopyOpBase
 {
 public:
-    typedef typename GridType::ValueType ValueT;
+    using ValueT = typename GridType::ValueType;
 
     CopyOpBase(bool toGrid, GridType& grid, py::object arrObj,
         py::object coordObj, py::object tolObj)
@@ -755,29 +962,30 @@ public:
         const Coord origin = extractValueArg<GridType, Coord>(
             coordObj, opName[toGrid], 1, "tuple(int, int, int)");
 
-        // Extract a reference to (not a copy of) the NumPy array.
-        const py::numeric::array arrayObj = pyutil::extractArg<py::numeric::array>(
+        // Extract a reference to (not a copy of) the NumPy array,
+        // or throw an exception if arrObj is not a NumPy array object.
+        const auto arrayObj = pyutil::extractArg<NumPyArrayType>(
             arrObj, opName[toGrid], pyutil::GridTraits<GridType>::name(),
             /*argIdx=*/1, "numpy.ndarray");
 
-        const PyArray_Descr* dtype = PyArray_DESCR(arrayObj.ptr());
-        const py::object shape = arrayObj.attr("shape");
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+        mArray = arrayObj.get_data();
+#else
+        mArray = PyArray_DATA(reinterpret_cast<PyArrayObject*>(arrayObj.ptr()));
+#endif
 
-        if (PyObject_HasAttrString(arrayObj.ptr(), "dtype")) {
-            mArrayTypeName = pyutil::str(arrayObj.attr("dtype"));
-        } else {
-            mArrayTypeName = "'_'";
-            mArrayTypeName[1] = dtype->kind;
-        }
+        mArrayTypeName = arrayTypeName(arrayObj);
+        mArrayTypeId = arrayTypeId(arrayObj);
+        mArrayDims = arrayDimensions(arrayObj);
 
-        mArray = PyArray_DATA(arrayObj.ptr());
-        mArrayTypeNum = dtype->type_num;
         mTolerance = extractValueArg<GridType>(tolObj, opName[toGrid], 2);
-        for (long i = 0, N = py::len(shape); i < N; ++i) {
-            mArrayDims.push_back(py::extract<int>(shape[i]));
-        }
+
         // Compute the bounding box of the region of the grid that is to be copied from or to.
-        mBBox.reset(origin, origin.offsetBy(mArrayDims[0]-1, mArrayDims[1]-1, mArrayDims[2]-1));
+        Coord bboxMax = origin;
+        for (size_t n = 0, N = std::min<size_t>(mArrayDims.size(), 3); n < N; ++n) {
+            bboxMax[n] += int(mArrayDims[n]) - 1;
+        }
+        mBBox.reset(origin, bboxMax);
     }
     virtual ~CopyOpBase() {}
 
@@ -821,8 +1029,8 @@ protected:
     bool mToGrid; // if true, copy from the array to the grid, else vice-versa
     void* mArray;
     GridType* mGrid;
-    int mArrayTypeNum;
-    std::vector<int> mArrayDims;
+    DtId mArrayTypeId;
+    ArrayDimVec mArrayDims;
     std::string mArrayTypeName;
     CoordBBox mBBox;
     ValueT mTolerance;
@@ -844,7 +1052,7 @@ public:
     }
 
 protected:
-    virtual void validate() const
+    void validate() const override
     {
         if (this->mArrayDims.size() != 3) {
             std::ostringstream os;
@@ -855,32 +1063,32 @@ protected:
         }
     }
 
-    virtual void copyFromArray() const
+    void copyFromArray() const override
     {
-        switch (this->mArrayTypeNum) {
-        case NPY_FLOAT:  this->template fromArray<typename NumPyToCpp<NPY_FLOAT>::type>(); break;
-        case NPY_DOUBLE: this->template fromArray<typename NumPyToCpp<NPY_DOUBLE>::type>(); break;
-        case NPY_BOOL:   this->template fromArray<typename NumPyToCpp<NPY_BOOL>::type>(); break;
-        case NPY_INT16:  this->template fromArray<typename NumPyToCpp<NPY_INT16>::type>(); break;
-        case NPY_INT32:  this->template fromArray<typename NumPyToCpp<NPY_INT32>::type>(); break;
-        case NPY_INT64:  this->template fromArray<typename NumPyToCpp<NPY_INT64>::type>(); break;
-        case NPY_UINT32: this->template fromArray<typename NumPyToCpp<NPY_UINT32>::type>(); break;
-        case NPY_UINT64: this->template fromArray<typename NumPyToCpp<NPY_UINT64>::type>(); break;
+        switch (this->mArrayTypeId) {
+        case DtId::FLOAT: this->template fromArray<typename NumPyToCpp<DtId::FLOAT>::type>(); break;
+        case DtId::DOUBLE:this->template fromArray<typename NumPyToCpp<DtId::DOUBLE>::type>();break;
+        case DtId::BOOL:  this->template fromArray<typename NumPyToCpp<DtId::BOOL>::type>(); break;
+        case DtId::INT16: this->template fromArray<typename NumPyToCpp<DtId::INT16>::type>(); break;
+        case DtId::INT32: this->template fromArray<typename NumPyToCpp<DtId::INT32>::type>(); break;
+        case DtId::INT64: this->template fromArray<typename NumPyToCpp<DtId::INT64>::type>(); break;
+        case DtId::UINT32:this->template fromArray<typename NumPyToCpp<DtId::UINT32>::type>();break;
+        case DtId::UINT64:this->template fromArray<typename NumPyToCpp<DtId::UINT64>::type>();break;
         default: throw openvdb::TypeError(); break;
         }
     }
 
-    virtual void copyToArray() const
+    void copyToArray() const override
     {
-        switch (this->mArrayTypeNum) {
-        case NPY_FLOAT:  this->template toArray<typename NumPyToCpp<NPY_FLOAT>::type>(); break;
-        case NPY_DOUBLE: this->template toArray<typename NumPyToCpp<NPY_DOUBLE>::type>(); break;
-        case NPY_BOOL:   this->template toArray<typename NumPyToCpp<NPY_BOOL>::type>(); break;
-        case NPY_INT16:  this->template toArray<typename NumPyToCpp<NPY_INT16>::type>(); break;
-        case NPY_INT32:  this->template toArray<typename NumPyToCpp<NPY_INT32>::type>(); break;
-        case NPY_INT64:  this->template toArray<typename NumPyToCpp<NPY_INT64>::type>(); break;
-        case NPY_UINT32: this->template toArray<typename NumPyToCpp<NPY_UINT32>::type>(); break;
-        case NPY_UINT64: this->template toArray<typename NumPyToCpp<NPY_UINT64>::type>(); break;
+        switch (this->mArrayTypeId) {
+        case DtId::FLOAT:  this->template toArray<typename NumPyToCpp<DtId::FLOAT>::type>(); break;
+        case DtId::DOUBLE: this->template toArray<typename NumPyToCpp<DtId::DOUBLE>::type>(); break;
+        case DtId::BOOL:   this->template toArray<typename NumPyToCpp<DtId::BOOL>::type>(); break;
+        case DtId::INT16:  this->template toArray<typename NumPyToCpp<DtId::INT16>::type>(); break;
+        case DtId::INT32:  this->template toArray<typename NumPyToCpp<DtId::INT32>::type>(); break;
+        case DtId::INT64:  this->template toArray<typename NumPyToCpp<DtId::INT64>::type>(); break;
+        case DtId::UINT32: this->template toArray<typename NumPyToCpp<DtId::UINT32>::type>(); break;
+        case DtId::UINT64: this->template toArray<typename NumPyToCpp<DtId::UINT64>::type>(); break;
         default: throw openvdb::TypeError(); break;
         }
     }
@@ -898,7 +1106,7 @@ public:
     }
 
 protected:
-    virtual void validate() const
+    void validate() const override
     {
         if (this->mArrayDims.size() != 4) {
             std::ostringstream os;
@@ -918,48 +1126,48 @@ protected:
         }
     }
 
-    virtual void copyFromArray() const
+    void copyFromArray() const override
     {
-        switch (this->mArrayTypeNum) {
-        case NPY_FLOAT:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_FLOAT>::type> >(); break;
-        case NPY_DOUBLE:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_DOUBLE>::type> >(); break;
-        case NPY_BOOL:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_BOOL>::type> >(); break;
-        case NPY_INT16:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_INT16>::type> >(); break;
-        case NPY_INT32:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_INT32>::type> >(); break;
-        case NPY_INT64:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_INT64>::type> >(); break;
-        case NPY_UINT32:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_UINT32>::type> >(); break;
-        case NPY_UINT64:
-            this->template fromArray<math::Vec3<typename NumPyToCpp<NPY_UINT64>::type> >(); break;
+        switch (this->mArrayTypeId) {
+        case DtId::FLOAT:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::FLOAT>::type>>(); break;
+        case DtId::DOUBLE:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::DOUBLE>::type>>(); break;
+        case DtId::BOOL:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::BOOL>::type>>(); break;
+        case DtId::INT16:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::INT16>::type>>(); break;
+        case DtId::INT32:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::INT32>::type>>(); break;
+        case DtId::INT64:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::INT64>::type>>(); break;
+        case DtId::UINT32:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::UINT32>::type>>(); break;
+        case DtId::UINT64:
+            this->template fromArray<math::Vec3<typename NumPyToCpp<DtId::UINT64>::type>>(); break;
         default: throw openvdb::TypeError(); break;
         }
     }
 
-    virtual void copyToArray() const
+    void copyToArray() const override
     {
-        switch (this->mArrayTypeNum) {
-        case NPY_FLOAT:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_FLOAT>::type> >(); break;
-        case NPY_DOUBLE:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_DOUBLE>::type> >(); break;
-        case NPY_BOOL:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_BOOL>::type> >(); break;
-        case NPY_INT16:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_INT16>::type> >(); break;
-        case NPY_INT32:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_INT32>::type> >(); break;
-        case NPY_INT64:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_INT64>::type> >(); break;
-        case NPY_UINT32:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_UINT32>::type> >(); break;
-        case NPY_UINT64:
-            this->template toArray<math::Vec3<typename NumPyToCpp<NPY_UINT64>::type> >(); break;
+        switch (this->mArrayTypeId) {
+        case DtId::FLOAT:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::FLOAT>::type>>(); break;
+        case DtId::DOUBLE:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::DOUBLE>::type>>(); break;
+        case DtId::BOOL:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::BOOL>::type>>(); break;
+        case DtId::INT16:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::INT16>::type>>(); break;
+        case DtId::INT32:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::INT32>::type>>(); break;
+        case DtId::INT64:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::INT64>::type>>(); break;
+        case DtId::UINT32:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::UINT32>::type>>(); break;
+        case DtId::UINT64:
+            this->template toArray<math::Vec3<typename NumPyToCpp<DtId::UINT64>::type>>(); break;
         default: throw openvdb::TypeError(); break;
         }
     }
@@ -970,7 +1178,7 @@ template<typename GridType>
 inline void
 copyFromArray(GridType& grid, py::object arrayObj, py::object coordObj, py::object toleranceObj)
 {
-    typedef typename GridType::ValueType ValueT;
+    using ValueT = typename GridType::ValueType;
     CopyOp<GridType, VecTraits<ValueT>::Size>
         op(/*toGrid=*/true, grid, arrayObj, coordObj, toleranceObj);
     op();
@@ -981,10 +1189,338 @@ template<typename GridType>
 inline void
 copyToArray(GridType& grid, py::object arrayObj, py::object coordObj)
 {
-    typedef typename GridType::ValueType ValueT;
+    using ValueT = typename GridType::ValueType;
     CopyOp<GridType, VecTraits<ValueT>::Size>
         op(/*toGrid=*/false, grid, arrayObj, coordObj);
     op();
+}
+
+#endif // defined(PY_OPENVDB_USE_NUMPY)
+
+
+////////////////////////////////////////
+
+
+#ifndef PY_OPENVDB_USE_NUMPY
+
+template<typename GridType>
+inline typename GridType::Ptr
+meshToLevelSet(py::object, py::object, py::object, py::object, py::object)
+{
+    PyErr_SetString(PyExc_NotImplementedError, "this module was built without NumPy support");
+    boost::python::throw_error_already_set();
+    return typename GridType::Ptr();
+}
+
+template<typename GridType>
+inline py::object
+volumeToQuadMesh(const GridType&, py::object)
+{
+    PyErr_SetString(PyExc_NotImplementedError, "this module was built without NumPy support");
+    boost::python::throw_error_already_set();
+    return py::object();
+}
+
+template<typename GridType>
+inline py::object
+volumeToMesh(const GridType&, py::object, py::object)
+{
+    PyErr_SetString(PyExc_NotImplementedError, "this module was built without NumPy support");
+    boost::python::throw_error_already_set();
+    return py::object();
+}
+
+#else // if defined(PY_OPENVDB_USE_NUMPY)
+
+// Helper class for meshToLevelSet()
+template<typename SrcT, typename DstT>
+struct CopyVecOp {
+    void operator()(const void* srcPtr, DstT* dst, size_t count) {
+        const SrcT* src = static_cast<const SrcT*>(srcPtr);
+        for (size_t i = count; i > 0; --i, ++src, ++dst) {
+            *dst = static_cast<DstT>(*src);
+        }
+    }
+};
+// Partial specialization for source and destination arrays of the same type
+template<typename T>
+struct CopyVecOp<T, T> {
+    void operator()(const void* srcPtr, T* dst, size_t count) {
+        const T* src = static_cast<const T*>(srcPtr);
+        ::memcpy(dst, src, count * sizeof(T));
+    }
+};
+
+
+// Helper function for use with meshToLevelSet() to copy vectors of various types
+// and sizes from NumPy arrays to STL vectors
+template<typename VecT>
+inline void
+copyVecArray(NumPyArrayType& arrayObj, std::vector<VecT>& vec)
+{
+    using ValueT = typename VecT::ValueType;
+
+    // Get the input array dimensions.
+    const auto dims = arrayDimensions(arrayObj);
+    const size_t M = dims.empty() ? 0 : dims[0];
+    const size_t N = VecT().numElements();
+    if (M == 0 || N == 0) return;
+
+    // Preallocate the output vector.
+    vec.resize(M);
+
+    // Copy values from the input array to the output vector (with type conversion, if necessary).
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+    const void* src = arrayObj.get_data();
+#else
+    PyArrayObject* arrayObjPtr = reinterpret_cast<PyArrayObject*>(arrayObj.ptr());
+    const void* src = PyArray_DATA(arrayObjPtr);
+#endif
+    ValueT* dst = &vec[0][0];
+    switch (arrayTypeId(arrayObj)) {
+    case DtId::FLOAT:  CopyVecOp<NumPyToCpp<DtId::FLOAT>::type, ValueT>()(src, dst, M*N); break;
+    case DtId::DOUBLE: CopyVecOp<NumPyToCpp<DtId::DOUBLE>::type, ValueT>()(src, dst, M*N); break;
+    case DtId::INT16:  CopyVecOp<NumPyToCpp<DtId::INT16>::type, ValueT>()(src, dst, M*N); break;
+    case DtId::INT32:  CopyVecOp<NumPyToCpp<DtId::INT32>::type, ValueT>()(src, dst, M*N); break;
+    case DtId::INT64:  CopyVecOp<NumPyToCpp<DtId::INT64>::type, ValueT>()(src, dst, M*N); break;
+    case DtId::UINT32: CopyVecOp<NumPyToCpp<DtId::UINT32>::type, ValueT>()(src, dst, M*N); break;
+    case DtId::UINT64: CopyVecOp<NumPyToCpp<DtId::UINT64>::type, ValueT>()(src, dst, M*N); break;
+    default: break;
+    }
+}
+
+
+/// @brief Given NumPy arrays of points, triangle indices and quad indices,
+/// call tools::meshToLevelSet() to generate a level set grid.
+template<typename GridType>
+inline typename GridType::Ptr
+meshToLevelSet(py::object pointsObj, py::object trianglesObj, py::object quadsObj,
+    py::object xformObj, py::object halfWidthObj)
+{
+    struct Local {
+        // Return the name of the Python grid method (for use in error messages).
+        static const char* methodName() { return "createLevelSetFromPolygons"; }
+
+        // Raise a Python exception if the given NumPy array does not have dimensions M x N
+        // or does not have an integer or floating-point data type.
+        static void validate2DNumPyArray(NumPyArrayType arrayObj,
+            const size_t N, const char* desiredType)
+        {
+            const auto dims = arrayDimensions(arrayObj);
+
+            bool wrongArrayType = false;
+            // Check array dimensions.
+            if (dims.size() != 2 || dims[1] != N) {
+                wrongArrayType = true;
+            } else {
+                // Check array data type.
+                switch (arrayTypeId(arrayObj)) {
+                    case DtId::FLOAT: case DtId::DOUBLE: //case DtId::HALF:
+                    case DtId::INT16: case DtId::INT32: case DtId::INT64:
+                    case DtId::UINT32: case DtId::UINT64: break;
+                    default: wrongArrayType = true; break;
+                }
+            }
+            if (wrongArrayType) {
+                // Generate an error message and raise a Python TypeError.
+                std::ostringstream os;
+                os << "expected N x 3 numpy.ndarray of " << desiredType << ", found ";
+                switch (dims.size()) {
+                    case 0: os << "zero-dimensional"; break;
+                    case 1: os << "one-dimensional"; break;
+                    default:
+                        os << dims[0];
+                        for (size_t i = 1; i < dims.size(); ++i) { os << " x " << dims[i]; }
+                        break;
+                }
+                os << " " << arrayTypeName(arrayObj) << " array as argument 1 to "
+                    << pyutil::GridTraits<GridType>::name() << "." << methodName() << "()";
+                PyErr_SetString(PyExc_TypeError, os.str().c_str());
+                py::throw_error_already_set();
+            }
+        }
+    };
+
+    // Extract the narrow band half width from the arguments to this method.
+    const float halfWidth = extractValueArg<GridType, float>(
+        halfWidthObj, Local::methodName(), /*argIdx=*/5, "float");
+
+    // Extract the transform from the arguments to this method.
+    math::Transform::Ptr xform = math::Transform::createLinearTransform();
+    if (!xformObj.is_none()) {
+        xform = extractValueArg<GridType, math::Transform::Ptr>(
+            xformObj, Local::methodName(), /*argIdx=*/4, "Transform");
+    }
+
+    // Extract the list of mesh vertices from the arguments to this method.
+    std::vector<Vec3s> points;
+    if (!pointsObj.is_none()) {
+        // Extract a reference to (not a copy of) a NumPy array argument,
+        // or throw an exception if the argument is not a NumPy array object.
+        auto arrayObj = extractValueArg<GridType, NumPyArrayType>(
+            pointsObj, Local::methodName(), /*argIdx=*/1, "numpy.ndarray");
+
+        // Throw an exception if the array has the wrong type or dimensions.
+        Local::validate2DNumPyArray(arrayObj, /*N=*/3, /*desiredType=*/"float");
+
+        // Copy values from the array to the vector.
+        copyVecArray(arrayObj, points);
+    }
+
+    // Extract the list of triangle indices from the arguments to this method.
+    std::vector<Vec3I> triangles;
+    if (!trianglesObj.is_none()) {
+        auto arrayObj = extractValueArg<GridType, NumPyArrayType>(
+            trianglesObj, Local::methodName(), /*argIdx=*/2, "numpy.ndarray");
+        Local::validate2DNumPyArray(arrayObj, /*N=*/3, /*desiredType=*/"int");
+        copyVecArray(arrayObj, triangles);
+    }
+
+    // Extract the list of quad indices from the arguments to this method.
+    std::vector<Vec4I> quads;
+    if (!quadsObj.is_none()) {
+        auto arrayObj = extractValueArg<GridType, NumPyArrayType>(
+            quadsObj, Local::methodName(), /*argIdx=*/3, "numpy.ndarray");
+        Local::validate2DNumPyArray(arrayObj, /*N=*/4, /*desiredType=*/"int");
+        copyVecArray(arrayObj, quads);
+    }
+
+    // Generate and return a level set grid.
+    return tools::meshToLevelSet<GridType>(*xform, points, triangles, quads, halfWidth);
+}
+
+
+template<typename GridType>
+inline py::object
+volumeToQuadMesh(const GridType& grid, py::object isovalueObj)
+{
+    const double isovalue = pyutil::extractArg<double>(
+        isovalueObj, "convertToQuads", /*className=*/nullptr, /*argIdx=*/2, "float");
+
+    // Mesh the input grid and populate lists of mesh vertices and face vertex indices.
+    std::vector<Vec3s> points;
+    std::vector<Vec4I> quads;
+    tools::volumeToMesh(grid, points, quads, isovalue);
+
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+    const py::object own;
+    auto dtype = py::numpy::dtype::get_builtin<Vec3s::value_type>();
+    auto shape = py::make_tuple(points.size(), 3);
+    auto stride = py::make_tuple(3 * sizeof(Vec3s::value_type), sizeof(Vec3s::value_type));
+    // Create a deep copy of the array (because the point vector will be destroyed
+    // when this function returns).
+    auto pointArrayObj = py::numpy::from_data(points.data(), dtype, shape, stride, own).copy();
+
+    dtype = py::numpy::dtype::get_builtin<Vec4I::value_type>();
+    shape = py::make_tuple(quads.size(), 4);
+    stride = py::make_tuple(4 * sizeof(Vec4I::value_type), sizeof(Vec4I::value_type));
+    auto quadArrayObj = py::numpy::from_data(
+        quads.data(), dtype, shape, stride, own).copy(); // deep copy
+#else // !defined PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+    // Copy vertices into an N x 3 NumPy array.
+    py::object pointArrayObj = py::numeric::array(py::list(), "float32");
+    if (!points.empty()) {
+        npy_intp dims[2] = { npy_intp(points.size()), 3 };
+        // Construct a NumPy array that wraps the point vector.
+        if (PyArrayObject* arrayObj = reinterpret_cast<PyArrayObject*>(
+            PyArray_SimpleNewFromData(/*nd=*/2, dims, NPY_FLOAT, &points[0])))
+        {
+            // Create a deep copy of the array (because the point vector will be
+            // destroyed when this function returns).
+            pointArrayObj = copyNumPyArray(arrayObj, NPY_CORDER);
+        }
+    }
+
+    // Copy face indices into an N x 4 NumPy array.
+    py::object quadArrayObj = py::numeric::array(py::list(), "uint32");
+    if (!quads.empty()) {
+        npy_intp dims[2] = { npy_intp(quads.size()), 4 };
+        if (PyArrayObject* arrayObj = reinterpret_cast<PyArrayObject*>(
+            PyArray_SimpleNewFromData(/*dims=*/2, dims, NPY_UINT32, &quads[0])))
+        {
+            quadArrayObj = copyNumPyArray(arrayObj, NPY_CORDER);
+        }
+    }
+#endif // PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+    return py::make_tuple(pointArrayObj, quadArrayObj);
+}
+
+
+template<typename GridType>
+inline py::object
+volumeToMesh(const GridType& grid, py::object isovalueObj, py::object adaptivityObj)
+{
+    const double isovalue = pyutil::extractArg<double>(
+        isovalueObj, "convertToPolygons", /*className=*/nullptr, /*argIdx=*/2, "float");
+    const double adaptivity = pyutil::extractArg<double>(
+        adaptivityObj, "convertToPolygons", /*className=*/nullptr, /*argIdx=*/3, "float");
+
+    // Mesh the input grid and populate lists of mesh vertices and face vertex indices.
+    std::vector<Vec3s> points;
+    std::vector<Vec3I> triangles;
+    std::vector<Vec4I> quads;
+    tools::volumeToMesh(grid, points, triangles, quads, isovalue, adaptivity);
+
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+    const py::object own;
+    auto dtype = py::numpy::dtype::get_builtin<Vec3s::value_type>();
+    auto shape = py::make_tuple(points.size(), 3);
+    auto stride = py::make_tuple(3 * sizeof(Vec3s::value_type), sizeof(Vec3s::value_type));
+    // Create a deep copy of the array (because the point vector will be destroyed
+    // when this function returns).
+    auto pointArrayObj = py::numpy::from_data(points.data(), dtype, shape, stride, own).copy();
+
+    dtype = py::numpy::dtype::get_builtin<Vec3I::value_type>();
+    shape = py::make_tuple(triangles.size(), 3);
+    stride = py::make_tuple(3 * sizeof(Vec3I::value_type), sizeof(Vec3I::value_type));
+    auto triangleArrayObj = py::numpy::from_data(
+        triangles.data(), dtype, shape, stride, own).copy(); // deep copy
+
+    dtype = py::numpy::dtype::get_builtin<Vec4I::value_type>();
+    shape = py::make_tuple(quads.size(), 4);
+    stride = py::make_tuple(4 * sizeof(Vec4I::value_type), sizeof(Vec4I::value_type));
+    auto quadArrayObj = py::numpy::from_data(
+        quads.data(), dtype, shape, stride, own).copy(); // deep copy
+#else // !defined PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+    // Copy vertices into an N x 3 NumPy array.
+    py::object pointArrayObj = py::numeric::array(py::list(), "float32");
+    if (!points.empty()) {
+        npy_intp dims[2] = { npy_intp(points.size()), 3 };
+        // Construct a NumPy array that wraps the point vector.
+        if (PyArrayObject* arrayObj = reinterpret_cast<PyArrayObject*>(
+            PyArray_SimpleNewFromData(/*dims=*/2, dims, NPY_FLOAT, &points[0])))
+        {
+            // Create a deep copy of the array (because the point vector will be
+            // destroyed when this function returns).
+            pointArrayObj = copyNumPyArray(arrayObj, NPY_CORDER);
+        }
+    }
+
+    // Copy triangular face indices into an N x 3 NumPy array.
+    py::object triangleArrayObj = py::numeric::array(py::list(), "uint32");
+    if (!triangles.empty()) {
+        npy_intp dims[2] = { npy_intp(triangles.size()), 3 };
+        if (PyArrayObject* arrayObj = reinterpret_cast<PyArrayObject*>(
+            PyArray_SimpleNewFromData(/*dims=*/2, dims, NPY_UINT32, &triangles[0])))
+        {
+            triangleArrayObj = copyNumPyArray(arrayObj, NPY_CORDER);
+        }
+    }
+
+    // Copy quadrilateral face indices into an N x 4 NumPy array.
+    py::object quadArrayObj = py::numeric::array(py::list(), "uint32");
+    if (!quads.empty()) {
+        npy_intp dims[2] = { npy_intp(quads.size()), 4 };
+        if (PyArrayObject* arrayObj = reinterpret_cast<PyArrayObject*>(
+            PyArray_SimpleNewFromData(/*dims=*/2, dims, NPY_UINT32, &quads[0])))
+        {
+            quadArrayObj = copyNumPyArray(arrayObj, NPY_CORDER);
+        }
+    }
+#endif // PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+
+    return py::make_tuple(pointArrayObj, triangleArrayObj, quadArrayObj);
 }
 
 #endif // defined(PY_OPENVDB_USE_NUMPY)
@@ -997,7 +1533,7 @@ template<typename GridType, typename IterType>
 inline void
 applyMap(const char* methodName, GridType& grid, py::object funcObj)
 {
-    typedef typename GridType::ValueType ValueT;
+    using ValueT = typename GridType::ValueType;
 
     for (IterType it = grid.tree().template begin<IterType>(); it; ++it) {
         // Evaluate the functor.
@@ -1050,8 +1586,8 @@ mapAll(GridType& grid, py::object funcObj)
 template<typename GridType>
 struct TreeCombineOp
 {
-    typedef typename GridType::TreeType TreeT;
-    typedef typename GridType::ValueType ValueT;
+    using TreeT = typename GridType::TreeType;
+    using ValueT = typename GridType::ValueType;
 
     TreeCombineOp(py::object _op): op(_op) {}
     void operator()(const ValueT& a, const ValueT& b, ValueT& result)
@@ -1078,7 +1614,7 @@ template<typename GridType>
 inline void
 combine(GridType& grid, py::object otherGridObj, py::object funcObj)
 {
-    typedef typename GridType::Ptr GridPtr;
+    using GridPtr = typename GridType::Ptr;
     GridPtr otherGrid = extractValueArg<GridType, GridPtr>(otherGridObj,
         "combine", 1, pyutil::GridTraits<GridType>::name());
     TreeCombineOp<GridType> op(funcObj);
@@ -1115,12 +1651,12 @@ template<typename GridT, typename IterT> struct IterTraits
 
 template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOnCIter>
 {
-    typedef typename GridT::ValueOnCIter IterT;
+    using IterT = typename GridT::ValueOnCIter;
     static std::string name() { return "ValueOnCIter"; }
     static std::string descr()
     {
         return std::string("Read-only iterator over the active values (tile and voxel)\nof a ")
-            + pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name();
+            + pyutil::GridTraits<typename std::remove_const<GridT>::type>::name();
     }
     static IterWrap<const GridT, IterT> begin(typename GridT::Ptr g)
     {
@@ -1130,12 +1666,12 @@ template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOnCIter>
 
 template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOffCIter>
 {
-    typedef typename GridT::ValueOffCIter IterT;
+    using IterT = typename GridT::ValueOffCIter;
     static std::string name() { return "ValueOffCIter"; }
     static std::string descr()
     {
         return std::string("Read-only iterator over the inactive values (tile and voxel)\nof a ")
-            + pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name();
+            + pyutil::GridTraits<typename std::remove_const<GridT>::type>::name();
     }
     static IterWrap<const GridT, IterT> begin(typename GridT::Ptr g)
     {
@@ -1145,12 +1681,12 @@ template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOffCIter>
 
 template<typename GridT> struct IterTraits<GridT, typename GridT::ValueAllCIter>
 {
-    typedef typename GridT::ValueAllCIter IterT;
+    using IterT = typename GridT::ValueAllCIter;
     static std::string name() { return "ValueAllCIter"; }
     static std::string descr()
     {
         return std::string("Read-only iterator over all tile and voxel values of a ")
-            + pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name();
+            + pyutil::GridTraits<typename std::remove_const<GridT>::type>::name();
     }
     static IterWrap<const GridT, IterT> begin(typename GridT::Ptr g)
     {
@@ -1160,12 +1696,12 @@ template<typename GridT> struct IterTraits<GridT, typename GridT::ValueAllCIter>
 
 template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOnIter>
 {
-    typedef typename GridT::ValueOnIter IterT;
+    using IterT = typename GridT::ValueOnIter;
     static std::string name() { return "ValueOnIter"; }
     static std::string descr()
     {
         return std::string("Read/write iterator over the active values (tile and voxel)\nof a ")
-            + pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name();
+            + pyutil::GridTraits<typename std::remove_const<GridT>::type>::name();
     }
     static IterWrap<GridT, IterT> begin(typename GridT::Ptr g)
     {
@@ -1175,12 +1711,12 @@ template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOnIter>
 
 template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOffIter>
 {
-    typedef typename GridT::ValueOffIter IterT;
+    using IterT = typename GridT::ValueOffIter;
     static std::string name() { return "ValueOffIter"; }
     static std::string descr()
     {
         return std::string("Read/write iterator over the inactive values (tile and voxel)\nof a ")
-            + pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name();
+            + pyutil::GridTraits<typename std::remove_const<GridT>::type>::name();
     }
     static IterWrap<GridT, IterT> begin(typename GridT::Ptr g)
     {
@@ -1190,12 +1726,12 @@ template<typename GridT> struct IterTraits<GridT, typename GridT::ValueOffIter>
 
 template<typename GridT> struct IterTraits<GridT, typename GridT::ValueAllIter>
 {
-    typedef typename GridT::ValueAllIter IterT;
+    using IterT = typename GridT::ValueAllIter;
     static std::string name() { return "ValueAllIter"; }
     static std::string descr()
     {
         return std::string("Read/write iterator over all tile and voxel values of a ")
-            + pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name();
+            + pyutil::GridTraits<typename std::remove_const<GridT>::type>::name();
     }
     static IterWrap<GridT, IterT> begin(typename GridT::Ptr g)
     {
@@ -1211,7 +1747,7 @@ template<typename GridT> struct IterTraits<GridT, typename GridT::ValueAllIter>
 template<typename GridT, typename IterT>
 struct IterItemSetter
 {
-    typedef typename GridT::ValueType ValueT;
+    using ValueT = typename GridT::ValueType;
     static void setValue(const IterT& iter, const ValueT& val) { iter.setValue(val); }
     static void setActive(const IterT& iter, bool on) { iter.setActiveState(on); }
 };
@@ -1220,13 +1756,13 @@ struct IterItemSetter
 template<typename GridT, typename IterT>
 struct IterItemSetter<const GridT, IterT>
 {
-    typedef typename GridT::ValueType ValueT;
-    static void setValue(const IterT& iter, const ValueT& val)
+    using ValueT = typename GridT::ValueType;
+    static void setValue(const IterT&, const ValueT&)
     {
         PyErr_SetString(PyExc_AttributeError, "can't set attribute 'value'");
         py::throw_error_already_set();
     }
-    static void setActive(const IterT& iter, bool on)
+    static void setActive(const IterT&, bool /*on*/)
     {
         PyErr_SetString(PyExc_AttributeError, "can't set attribute 'active'");
         py::throw_error_already_set();
@@ -1242,10 +1778,10 @@ template<typename _GridT, typename _IterT>
 class IterValueProxy
 {
 public:
-    typedef _GridT GridT;
-    typedef _IterT IterT;
-    typedef typename GridT::ValueType ValueT;
-    typedef IterItemSetter<GridT, IterT> SetterT;
+    using GridT = _GridT;
+    using IterT = _IterT;
+    using ValueT = typename GridT::ValueType;
+    using SetterT = IterItemSetter<GridT, IterT>;
 
     IterValueProxy(typename GridT::ConstPtr grid, const IterT& iter): mGrid(grid), mIter(iter) {}
 
@@ -1267,7 +1803,7 @@ public:
     static const char* const * keys()
     {
         static const char* const sKeys[] = {
-            "value", "active", "depth", "min", "max", "count", NULL
+            "value", "active", "depth", "min", "max", "count", nullptr
         };
         return sKeys;
     }
@@ -1275,7 +1811,7 @@ public:
     /// Return @c true if the given string is a valid key.
     static bool hasKey(const std::string& key)
     {
-        for (int i = 0; keys()[i] != NULL; ++i) {
+        for (int i = 0; keys()[i] != nullptr; ++i) {
             if (key == keys()[i]) return true;
         }
         return false;
@@ -1285,7 +1821,7 @@ public:
     static py::list getKeys()
     {
         py::list keyList;
-        for (int i = 0; keys()[i] != NULL; ++i) keyList.append(keys()[i]);
+        for (int i = 0; keys()[i] != nullptr; ++i) keyList.append(keys()[i]);
         return keyList;
     }
 
@@ -1335,7 +1871,7 @@ public:
     {
         return (other.getActive() == this->getActive()
             && other.getDepth() == this->getDepth()
-            && other.getValue() == this->getValue()
+            && math::isExactlyEqual(other.getValue(), this->getValue())
             && other.getBBoxMin() == this->getBBoxMin()
             && other.getBBoxMax() == this->getBBoxMax()
             && other.getVoxelCount() == this->getVoxelCount());
@@ -1347,7 +1883,7 @@ public:
     {
         // valuesAsStrings = ["%s: %s" % key, repr(this[key]) for key in this.keys()]
         py::list valuesAsStrings;
-        for (int i = 0; this->keys()[i] != NULL; ++i) {
+        for (int i = 0; this->keys()[i] != nullptr; ++i) {
             py::str
                 key(this->keys()[i]),
                 val(this->getItem(key).attr("__repr__")());
@@ -1383,11 +1919,11 @@ template<typename _GridT, typename _IterT>
 class IterWrap
 {
 public:
-    typedef _GridT GridT;
-    typedef _IterT IterT;
-    typedef typename GridT::ValueType ValueT;
-    typedef IterValueProxy<GridT, IterT> IterValueProxyT;
-    typedef IterTraits<GridT, IterT> Traits;
+    using GridT = _GridT;
+    using IterT = _IterT;
+    using ValueT = typename GridT::ValueType;
+    using IterValueProxyT = IterValueProxy<GridT, IterT>;
+    using Traits = IterTraits<GridT, IterT>;
 
     IterWrap(typename GridT::ConstPtr grid, const IterT& iter): mGrid(grid), mIter(iter) {}
 
@@ -1412,7 +1948,7 @@ public:
     static void wrap()
     {
         const std::string
-            gridClassName = pyutil::GridTraits<typename boost::remove_const<GridT>::type>::name(),
+            gridClassName = pyutil::GridTraits<typename std::remove_const<GridT>::type>::name(),
             iterClassName = /*gridClassName +*/ Traits::name(),
             valueClassName = /*gridClassName +*/ "Value";
 
@@ -1425,6 +1961,7 @@ public:
                 ("the " + gridClassName + " over which to iterate").c_str())
 
             .def("next", &IterWrap::next, ("next() -> " + valueClassName).c_str())
+            .def("__next__", &IterWrap::next, ("__next__() -> " + valueClassName).c_str())
             .def("__iter__", &returnSelf);
 
         py::class_<IterValueProxyT>(
@@ -1487,9 +2024,9 @@ private:
 
 
 template<typename GridT>
-struct PickleSuite: py::pickle_suite
+struct PickleSuite: public py::pickle_suite
 {
-    typedef typename GridT::Ptr GridPtrT;
+    using GridPtrT = typename GridT::Ptr;
 
     /// Return @c true, indicating that this pickler preserves a Grid's __dict__.
     static bool getstate_manages_dict() { return true; }
@@ -1514,7 +2051,14 @@ struct PickleSuite: py::pickle_suite
             }
             // Construct a state tuple comprising the Python object's __dict__
             // and the serialized Grid.
-            state = py::make_tuple(gridObj.attr("__dict__"), ostr.str());
+#if PY_MAJOR_VERSION >= 3
+            // Convert the byte string to a "bytes" sequence.
+            const std::string s = ostr.str();
+            py::object bytesObj = pyutil::pyBorrow(PyBytes_FromStringAndSize(s.data(), s.size()));
+#else
+            py::str bytesObj(ostr.str());
+#endif
+            state = py::make_tuple(gridObj.attr("__dict__"), bytesObj);
         }
         return state;
     }
@@ -1549,15 +2093,35 @@ struct PickleSuite: py::pickle_suite
 
         std::string serialized;
         if (!badState) {
-            // Extract the string containing the serialized Grid.
-            py::extract<std::string> x(state[1]);
+            // Extract the sequence containing the serialized Grid.
+            py::object bytesObj = state[1];
+#if PY_MAJOR_VERSION >= 3
+            badState = true;
+            if (PyBytes_Check(bytesObj.ptr())) {
+                // Convert the "bytes" sequence to a byte string.
+                char* buf = nullptr;
+                Py_ssize_t length = 0;
+                if (-1 != PyBytes_AsStringAndSize(bytesObj.ptr(), &buf, &length)) {
+                    if (buf != nullptr && length > 0) {
+                        serialized.assign(buf, buf + length);
+                        badState = false;
+                    }
+                }
+            }
+#else
+            py::extract<std::string> x(bytesObj);
             if (x.check()) serialized = x();
             else badState = true;
+#endif
         }
 
         if (badState) {
             PyErr_SetObject(PyExc_ValueError,
+#if PY_MAJOR_VERSION >= 3
+                ("expected (dict, bytes) tuple in call to __setstate__; found %s"
+#else
                 ("expected (dict, str) tuple in call to __setstate__; found %s"
+#endif
                      % stateObj.attr("__repr__")()).ptr());
             py::throw_error_already_set();
         }
@@ -1588,16 +2152,16 @@ template<typename GridType>
 inline void
 exportGrid()
 {
-    typedef typename GridType::ValueType ValueT;
-    typedef typename GridType::Ptr GridPtr;
-    typedef pyutil::GridTraits<GridType> Traits;
+    using ValueT = typename GridType::ValueType;
+    using GridPtr = typename GridType::Ptr;
+    using Traits = pyutil::GridTraits<GridType>;
 
-    typedef typename GridType::ValueOnCIter  ValueOnCIterT;
-    typedef typename GridType::ValueOffCIter ValueOffCIterT;
-    typedef typename GridType::ValueAllCIter ValueAllCIterT;
-    typedef typename GridType::ValueOnIter   ValueOnIterT;
-    typedef typename GridType::ValueOffIter  ValueOffIterT;
-    typedef typename GridType::ValueAllIter  ValueAllIterT;
+    using ValueOnCIterT = typename GridType::ValueOnCIter;
+    using ValueOffCIterT = typename GridType::ValueOffCIter;
+    using ValueAllCIterT = typename GridType::ValueAllCIter;
+    using ValueOnIterT = typename GridType::ValueOnIter;
+    using ValueOffIterT = typename GridType::ValueOffIter;
+    using ValueAllIterT = typename GridType::ValueAllIter;
 
     math::Transform::Ptr (GridType::*getTransform)() = &GridType::transformPtr;
 
@@ -1812,6 +2376,49 @@ exportGrid()
                 + "-dimensional array with values\n"
                 "from this grid, starting at voxel (i, j, k).").c_str())
 
+            .def("convertToQuads",
+                &pyGrid::volumeToQuadMesh<GridType>,
+                (py::arg("isovalue")=0),
+                "convertToQuads(isovalue=0) -> points, quads\n\n"
+                "Uniformly mesh a scalar grid that has a continuous isosurface\n"
+                "at the given isovalue.  Return a NumPy array of world-space\n"
+                "points and a NumPy array of 4-tuples of point indices, which\n"
+                "specify the vertices of the quadrilaterals that form the mesh.")
+            .def("convertToPolygons",
+                &pyGrid::volumeToMesh<GridType>,
+                (py::arg("isovalue")=0, py::arg("adaptivity")=0),
+                "convertToPolygons(isovalue=0, adaptivity=0) -> points, triangles, quads\n\n"
+                "Adaptively mesh a scalar grid that has a continuous isosurface\n"
+                "at the given isovalue.  Return a NumPy array of world-space\n"
+                "points and NumPy arrays of 3- and 4-tuples of point indices,\n"
+                "which specify the vertices of the triangles and quadrilaterals\n"
+                "that form the mesh.  Adaptivity can vary from 0 to 1, where 0\n"
+                "produces a high-polygon-count mesh that closely approximates\n"
+                "the isosurface, and 1 produces a lower-polygon-count mesh\n"
+                "with some loss of surface detail.")
+            .def("createLevelSetFromPolygons",
+                &pyGrid::meshToLevelSet<GridType>,
+                (py::arg("points"),
+                     py::arg("triangles")=py::object(),
+                     py::arg("quads")=py::object(),
+                     py::arg("transform")=py::object(),
+                     py::arg("halfWidth")=openvdb::LEVEL_SET_HALF_WIDTH),
+                ("createLevelSetFromPolygons(points, triangles=None, quads=None,\n"
+                 "    transform=None, halfWidth="
+                 + std::to_string(openvdb::LEVEL_SET_HALF_WIDTH) + ") -> "
+                 + pyGridTypeName + "\n\n"
+                "Convert a triangle and/or quad mesh to a narrow-band level set volume.\n"
+                "The mesh must form a closed surface, but the surface need not be\n"
+                "manifold and may have self intersections and degenerate faces.\n"
+                "The mesh is described by a NumPy array of world-space points\n"
+                "and NumPy arrays of 3- and 4-tuples of point indices that specify\n"
+                "the vertices of the triangles and quadrilaterals that form the mesh.\n"
+                "Either the triangle or the quad array may be empty or None.\n"
+                "The resulting volume will have the given transform (or the identity\n"
+                "transform if no transform is given) and a narrow band width of\n"
+                "2 x halfWidth voxels.").c_str())
+            .staticmethod("createLevelSetFromPolygons")
+
             .def("prune", &pyGrid::prune<GridType>,
                 (py::arg("tolerance")=0),
                 "prune(tolerance=0)\n\n"
@@ -1896,6 +2503,12 @@ exportGrid()
 
             ; // py::class_<Grid>
 
+#if DWA_BOOST_VERSION >= 1060000 && DWA_BOOST_VERSION < 1065000
+        // Boost versions 1.60 through 1.6x, for some x < 5, require the GridPtr-to-Python
+        // object converter to be explicitly registered.
+        py::register_ptr_to_python<GridPtr>();
+#endif
+
         py::implicitly_convertible<GridPtr, GridBase::Ptr>();
         py::implicitly_convertible<GridPtr, GridBase::ConstPtr>();
         /// @todo Is there a way to implicitly convert GridType references to GridBase
@@ -1929,6 +2542,6 @@ exportGrid()
 
 #endif // OPENVDB_PYGRID_HAS_BEEN_INCLUDED
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

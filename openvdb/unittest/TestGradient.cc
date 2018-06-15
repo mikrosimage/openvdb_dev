@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -28,34 +28,32 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 
-#include <sstream>
-#include <cppunit/extensions/HelperMacros.h>
 #include <openvdb/Types.h>
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/GridOperators.h>
 #include "util.h" // for unittest_util::makeSphere()
+#include <cppunit/extensions/HelperMacros.h>
+#include <sstream>
 
-#define ASSERT_DOUBLES_EXACTLY_EQUAL(expected, actual) \
-    CPPUNIT_ASSERT_DOUBLES_EQUAL((expected), (actual), /*tolerance=*/0.0);
 
 class TestGradient: public CppUnit::TestFixture
 {
 public:
-    virtual void setUp() { openvdb::initialize(); }
-    virtual void tearDown() { openvdb::uninitialize(); }
+    void setUp() override { openvdb::initialize(); }
+    void tearDown() override { openvdb::uninitialize(); }
 
     CPPUNIT_TEST_SUITE(TestGradient);
-    CPPUNIT_TEST(testISGradient);                    // Gradient in Index Space
+    CPPUNIT_TEST(testISGradient);               // gradient in index space
     CPPUNIT_TEST(testISGradientStencil);
-    CPPUNIT_TEST(testWSGradient);                    // Gradient in World Space
+    CPPUNIT_TEST(testWSGradient);               // gradient in world space
     CPPUNIT_TEST(testWSGradientStencil);
     CPPUNIT_TEST(testWSGradientStencilFrustum);
-    CPPUNIT_TEST(testWSGradientNormSqr);             // Gradient Norm Sqr (world space only)
-    CPPUNIT_TEST(testWSGradientNormSqrStencil);      // Gradient Norm Sqr (world space only)
-    CPPUNIT_TEST(testGradientTool);                  // Gradient tool
-    CPPUNIT_TEST(testGradientMaskedTool);            // Gradient tool
-    CPPUNIT_TEST(testIntersectsIsoValue);          // zero-crossing
-    CPPUNIT_TEST(testOldStyleStencils);              // old stencil impl - deprecate
+    CPPUNIT_TEST(testWSGradientNormSqr);        // gradient norm sqr (world space only)
+    CPPUNIT_TEST(testWSGradientNormSqrStencil); // gradient norm sqr (world space only)
+    CPPUNIT_TEST(testGradientTool);             // gradient tool
+    CPPUNIT_TEST(testGradientMaskedTool);       // gradient tool
+    CPPUNIT_TEST(testIntersectsIsoValue);       // zero-crossing
+    CPPUNIT_TEST(testOldStyleStencils);         // old stencil impl - deprecate
 
     CPPUNIT_TEST_SUITE_END();
 
@@ -80,7 +78,7 @@ TestGradient::testISGradient()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
+    using AccessorType = FloatGrid::ConstAccessor;
     FloatGrid::Ptr grid = createGrid<FloatGrid>(/*background=*/5.0);
     FloatTree& tree = grid->tree();
 
@@ -137,7 +135,6 @@ TestGradient::testISGradientStencil()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
     FloatGrid::Ptr grid = createGrid<FloatGrid>(/*background=*/5.0);
     FloatTree& tree = grid->tree();
 
@@ -190,7 +187,6 @@ TestGradient::testISGradientStencil()
 
     result = math::ISGradient<math::BD_WENO5>::result(stencil);
     CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0, result.length(), /*tolerance=*/0.01);
-
 }
 
 
@@ -199,7 +195,7 @@ TestGradient::testWSGradient()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
+    using AccessorType = FloatGrid::ConstAccessor;
 
     double voxel_size = 0.5;
     FloatGrid::Ptr grid = FloatGrid::create(/*background=*/5.0);
@@ -230,7 +226,7 @@ TestGradient::testWSGradient()
         // verify the new map is an affine map
         CPPUNIT_ASSERT(rotated_map->type() == math::AffineMap::mapType());
         math::AffineMap::Ptr affine_map =
-            boost::static_pointer_cast<math::AffineMap, math::MapBase>(rotated_map);
+            StaticPtrCast<math::AffineMap, math::MapBase>(rotated_map);
         // the gradient should have the same length even after rotation
         result = math::Gradient<math::AffineMap, math::CD_2ND>::result(
             *affine_map, inAccessor, xyz);
@@ -292,7 +288,7 @@ TestGradient::testWSGradient()
             dim, center, radius, *grid, unittest_util::SPHERE_DENSE);
 
         math::AffineMap::Ptr affine_map =
-            boost::static_pointer_cast<math::AffineMap, math::MapBase>(rotated_map);
+            StaticPtrCast<math::AffineMap, math::MapBase>(rotated_map);
 
         // math::ScaleMap map(voxel_sizes);
         result = math::Gradient<math::AffineMap, math::CD_2ND>::result(
@@ -307,8 +303,7 @@ TestGradient::testWSGradient()
         // remake the sphere
         unittest_util::makeSphere<FloatGrid>(
             dim, center, radius, *grid, unittest_util::SPHERE_DENSE);
-        math::ScaleMap::Ptr scale_map =
-            boost::static_pointer_cast<math::ScaleMap, math::MapBase>(base_map);
+        math::ScaleMap::Ptr scale_map = StaticPtrCast<math::ScaleMap, math::MapBase>(base_map);
 
         // math::ScaleMap map(voxel_sizes);
         result = math::Gradient<math::ScaleMap, math::CD_2ND>::result(*scale_map, inAccessor, xyz);
@@ -320,9 +315,9 @@ void
 TestGradient::testWSGradientStencilFrustum()
 {
     using namespace openvdb;
-    
+
     // Construct a frustum that matches the one in TestMaps::testFrustum()
-    
+
     openvdb::BBoxd bbox(Vec3d(0), Vec3d(100));
     math::NonlinearFrustumMap frustum(bbox, 1./6., 5);
     /// frustum will have depth, far plane - near plane = 5
@@ -330,12 +325,12 @@ TestGradient::testWSGradientStencilFrustum()
 
     Vec3d trans(2,2,2);
     math::NonlinearFrustumMap::Ptr map =
-        boost::static_pointer_cast<math::NonlinearFrustumMap, math::MapBase>(
+        StaticPtrCast<math::NonlinearFrustumMap, math::MapBase>(
             frustum.preScale(Vec3d(10,10,10))->postTranslate(trans));
 
-    
+
     // Create a grid with this frustum
-    
+
     FloatGrid::Ptr grid = FloatGrid::create(/*background=*/0.f);
     math::Transform::Ptr transform = math::Transform::Ptr( new math::Transform(map));
     grid->setTransform(transform);
@@ -344,10 +339,10 @@ TestGradient::testWSGradientStencilFrustum()
     // Totally fill the interior of the frustum with word space distances
     // from its center.
 
-    
+
     math::Vec3d isCenter(.5 * 101, .5 * 101, .5 * 101);
     math::Vec3d wsCenter = map->applyMap(isCenter);
-    
+
     math::Coord ijk;
 
     // convert to IntType
@@ -358,19 +353,19 @@ TestGradient::testWSGradientStencilFrustum()
         for (ijk[1] = min.y(); ijk[1] < max.y(); ++ijk[1]) {
             for (ijk[2] = min.z(); ijk[2] < max.z(); ++ijk[2]) {
                 const math::Vec3d wsLocation = transform->indexToWorld(ijk);
-                const float dis = (wsLocation - wsCenter).length();
-                
+                const float dis = float((wsLocation - wsCenter).length());
+
                 acc.setValue(ijk, dis);
             }
         }
     }
-    
+
 
     {
     // test at location 10, 10, 10 in index space
     math::Coord xyz(10, 10, 10);
-    
-    math::Vec3s result = 
+
+    math::Vec3s result =
           math::Gradient<math::NonlinearFrustumMap, math::CD_2ND>::result(*map, acc, xyz);
 
     // The Gradient should be unit lenght for this case
@@ -379,16 +374,16 @@ TestGradient::testWSGradientStencilFrustum()
     math::Vec3d wsVec = transform->indexToWorld(xyz);
     math::Vec3d direction = (wsVec - wsCenter);
     direction.normalize();
-     
+
     // test the actual direction of the gradient
     CPPUNIT_ASSERT(direction.eq(result, 0.01 /*tolerance*/));
-    }              
+    }
 
     {
     // test at location 30, 30, 60 in index space
     math::Coord xyz(30, 30, 60);
-    
-    math::Vec3s result = 
+
+    math::Vec3s result =
           math::Gradient<math::NonlinearFrustumMap, math::CD_2ND>::result(*map, acc, xyz);
 
     // The Gradient should be unit lenght for this case
@@ -397,20 +392,18 @@ TestGradient::testWSGradientStencilFrustum()
     math::Vec3d wsVec = transform->indexToWorld(xyz);
     math::Vec3d direction = (wsVec - wsCenter);
     direction.normalize();
-     
+
     // test the actual direction of the gradient
     CPPUNIT_ASSERT(direction.eq(result, 0.01 /*tolerance*/));
-    }              
+    }
 }
-    
+
 
 
 void
 TestGradient::testWSGradientStencil()
 {
     using namespace openvdb;
-
-    typedef FloatGrid::ConstAccessor  AccessorType;
 
     double voxel_size = 0.5;
     FloatGrid::Ptr grid = FloatGrid::create(/*background=*/5.0);
@@ -447,7 +440,7 @@ TestGradient::testWSGradientStencil()
         // verify the new map is an affine map
         CPPUNIT_ASSERT(rotated_map->type() == math::AffineMap::mapType());
         math::AffineMap::Ptr affine_map =
-            boost::static_pointer_cast<math::AffineMap, math::MapBase>(rotated_map);
+            StaticPtrCast<math::AffineMap, math::MapBase>(rotated_map);
         // the gradient should have the same length even after rotation
 
         result = math::Gradient<math::AffineMap, math::CD_2ND>::result(
@@ -458,7 +451,6 @@ TestGradient::testWSGradientStencil()
             *affine_map, dense_4thOrder);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0, result.length(), /*tolerance=*/0.01);
     }
-
     {
         math::UniformScaleTranslateMap map(voxel_size, Vec3d(0,0,0));
 
@@ -470,14 +462,12 @@ TestGradient::testWSGradientStencil()
         result = math::Gradient<math::ScaleTranslateMap, math::CD_2ND>::result(map, stencil);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0, result.length(), /*tolerance=*/0.01);
     }
-
     {
         math::TranslationMap map;
         result = math::Gradient<math::TranslationMap, math::CD_2ND>::result(map, stencil);
         // value = 1 because the translation map assumes uniform spacing
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.5, result.length(), /*tolerance=*/0.01);
     }
-
     {
         // test the GenericMap Grid interface
         math::GenericMap generic_map(*grid);
@@ -510,7 +500,7 @@ TestGradient::testWSGradientStencil()
         unittest_util::makeSphere<FloatGrid>(
             dim, center, radius, *grid, unittest_util::SPHERE_DENSE);
         math::AffineMap::Ptr affine_map =
-            boost::static_pointer_cast<math::AffineMap, math::MapBase>(rotated_map);
+            StaticPtrCast<math::AffineMap, math::MapBase>(rotated_map);
 
         stencil.moveTo(xyz);
         result = math::Gradient<math::AffineMap, math::CD_2ND>::result(*affine_map, stencil);
@@ -539,7 +529,7 @@ TestGradient::testWSGradientNormSqr()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
+    using AccessorType = FloatGrid::ConstAccessor;
     double voxel_size = 0.5;
     FloatGrid::Ptr grid = FloatGrid::create(/*background=*/5.0);
     grid->setTransform(math::Transform::createLinearTransform(voxel_size));
@@ -584,7 +574,6 @@ TestGradient::testWSGradientNormSqrStencil()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
     double voxel_size = 0.5;
     FloatGrid::Ptr grid = FloatGrid::create(/*background=*/5.0);
     grid->setTransform(math::Transform::createLinearTransform(voxel_size));
@@ -640,7 +629,6 @@ TestGradient::testGradientTool()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
     FloatGrid::Ptr grid = createGrid<FloatGrid>(/*background=*/5.0);
     FloatTree& tree = grid->tree();
 
@@ -652,7 +640,6 @@ TestGradient::testGradientTool()
     CPPUNIT_ASSERT(!tree.empty());
     CPPUNIT_ASSERT_EQUAL(dim[0]*dim[1]*dim[2], int(tree.activeVoxelCount()));
     const Coord xyz(10, 20, 30);
-
 
     Vec3SGrid::Ptr grad = tools::gradient(*grid);
     CPPUNIT_ASSERT_EQUAL(int(tree.activeVoxelCount()), int(grad->activeVoxelCount()));
@@ -666,7 +653,6 @@ TestGradient::testGradientMaskedTool()
 {
     using namespace openvdb;
 
-    typedef FloatGrid::ConstAccessor  AccessorType;
     FloatGrid::Ptr grid = createGrid<FloatGrid>(/*background=*/5.0);
     FloatTree& tree = grid->tree();
 
@@ -677,18 +663,18 @@ TestGradient::testGradientMaskedTool()
 
     CPPUNIT_ASSERT(!tree.empty());
     CPPUNIT_ASSERT_EQUAL(dim[0]*dim[1]*dim[2], int(tree.activeVoxelCount()));
-  
+
     const openvdb::CoordBBox maskbbox(openvdb::Coord(35, 30, 30), openvdb::Coord(41, 41, 41));
     BoolGrid::Ptr maskGrid = BoolGrid::create(false);
     maskGrid->fill(maskbbox, true/*value*/, true/*activate*/);
 
     Vec3SGrid::Ptr grad = tools::gradient(*grid, *maskGrid);
     {// outside the masked region
-        const Coord xyz(10, 20, 30); 
+        const Coord xyz(10, 20, 30);
         CPPUNIT_ASSERT(!maskbbox.isInside(xyz));
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, grad->getConstAccessor().getValue(xyz).length(),
                                      /*tolerance=*/0.01);
-    } 
+    }
     {// inside the masked region
         const Coord xyz(38, 35, 33);
         CPPUNIT_ASSERT(maskbbox.isInside(xyz));
@@ -826,6 +812,6 @@ TestGradient::testOldStyleStencils()
     CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0, cs.gradient().length(), /*tolerance=*/0.01);
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -55,26 +55,20 @@ const char
     * const GridBase::META_FILE_MEM_BYTES = "file_mem_bytes",
     * const GridBase::META_FILE_VOXEL_COUNT = "file_voxel_count";
 
-namespace {
-/// @todo Remove (deprecated in favor of META_SAVE_HALF_FLOAT)
-const char *SAVE_FLOAT_AS_HALF = "write as 16-bit float";
-}
-
 
 ////////////////////////////////////////
 
 
 namespace {
 
-typedef std::map<Name, GridBase::GridFactory> GridFactoryMap;
-typedef GridFactoryMap::const_iterator GridFactoryMapCIter;
+using GridFactoryMap = std::map<Name, GridBase::GridFactory>;
+using GridFactoryMapCIter = GridFactoryMap::const_iterator;
 
-typedef tbb::mutex Mutex;
-typedef Mutex::scoped_lock Lock;
+using Mutex = tbb::mutex;
+using Lock = Mutex::scoped_lock;
 
 struct LockedGridRegistry {
     LockedGridRegistry() {}
-    ~LockedGridRegistry() {}
     Mutex mMutex;
     GridFactoryMap mMap;
 };
@@ -89,9 +83,9 @@ getGridRegistry()
 {
     Lock lock(sInitGridRegistryMutex);
 
-    static LockedGridRegistry* registry = NULL;
+    static LockedGridRegistry* registry = nullptr;
 
-    if (registry == NULL) {
+    if (registry == nullptr) {
 
 #ifdef __ICC
 // Disable ICC "assignment to statically allocated variable" warning.
@@ -395,15 +389,10 @@ GridBase::setCreator(const std::string& creator)
 bool
 GridBase::saveFloatAsHalf() const
 {
-    bool saveAsHalf = false;
     if (Metadata::ConstPtr meta = (*this)[META_SAVE_HALF_FLOAT]) {
-        saveAsHalf = meta->asBool();
-    } else if ((*this)[SAVE_FLOAT_AS_HALF]) {
-        // Old behavior: saveAsHalf is true if metadata named
-        // SAVE_FLOAT_AS_HALF exists, regardless of its value.
-        saveAsHalf = true;
+        return meta->asBool();
     }
-    return saveAsHalf;
+    return false;
 }
 
 
@@ -412,9 +401,6 @@ GridBase::setSaveFloatAsHalf(bool saveAsHalf)
 {
     this->removeMeta(META_SAVE_HALF_FLOAT);
     this->insertMeta(META_SAVE_HALF_FLOAT, BoolMetadata(saveAsHalf));
-
-    // Remove the old, deprecated metadata.
-    this->removeMeta(SAVE_FLOAT_AS_HALF);
 }
 
 
@@ -461,27 +447,41 @@ GridBase::addStatsMetadata()
 MetaMap::Ptr
 GridBase::getStatsMetadata() const
 {
-    static const char* const sFields[] = {
+    const char* const fields[] = {
         META_FILE_BBOX_MIN,
         META_FILE_BBOX_MAX,
         META_FILE_MEM_BYTES,
         META_FILE_VOXEL_COUNT,
-        NULL
+        nullptr
     };
 
     /// @todo Check that the fields are of the correct type?
     MetaMap::Ptr ret(new MetaMap);
-    for (int i = 0; sFields[i] != NULL; ++i) {
-        if (Metadata::ConstPtr m = (*this)[sFields[i]]) {
-            ret->insertMeta(sFields[i], *m);
+    for (int i = 0; fields[i] != nullptr; ++i) {
+        if (Metadata::ConstPtr m = (*this)[fields[i]]) {
+            ret->insertMeta(fields[i], *m);
         }
     }
     return ret;
 }
 
+
+////////////////////////////////////////
+
+
+#if OPENVDB_ABI_VERSION_NUMBER >= 3
+void
+GridBase::clipGrid(const BBoxd& worldBBox)
+{
+    const CoordBBox indexBBox =
+        this->constTransform().worldToIndexNodeCentered(worldBBox);
+    this->clip(indexBBox);
+}
+#endif
+
 } // namespace OPENVDB_VERSION_NAME
 } // namespace openvdb
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

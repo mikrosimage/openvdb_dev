@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -32,20 +32,20 @@
 ///
 /// @author Peter Cucka
 
-#include <map>
-#include <sstream>
-#include <boost/type_traits/is_const.hpp>
-#include <boost/shared_ptr.hpp>
 #include <cppunit/extensions/HelperMacros.h>
 #include <openvdb/openvdb.h>
 #include <openvdb/tree/Tree.h>
+#include <map>
+#include <set>
+#include <sstream>
+#include <type_traits>
 
 
 class TestTreeVisitor: public CppUnit::TestCase
 {
 public:
-    virtual void setUp() { openvdb::initialize(); }
-    virtual void tearDown() { openvdb::uninitialize(); }
+    void setUp() override { openvdb::initialize(); }
+    void tearDown() override { openvdb::uninitialize(); }
 
     CPPUNIT_TEST_SUITE(TestTreeVisitor);
     CPPUNIT_TEST(testVisitTreeBool);
@@ -79,7 +79,7 @@ template<typename TreeT>
 TreeT
 TestTreeVisitor::createTestTree() const
 {
-    typedef typename TreeT::ValueType ValueT;
+    using ValueT = typename TreeT::ValueType;
     const ValueT zero = openvdb::zeroVal<ValueT>(), one = zero + 1;
 
     // Create a sparse test tree comprising the eight corners of
@@ -113,7 +113,7 @@ namespace {
 class Visitor
 {
 public:
-    typedef std::map<openvdb::Index, std::set<const void*> > NodeMap;
+    using NodeMap = std::map<openvdb::Index, std::set<const void*> >;
 
     Visitor(): mSkipLeafNodes(false) { reset(); }
 
@@ -129,13 +129,13 @@ public:
     template<typename IterT>
     bool operator()(IterT& iter)
     {
-        incrementIterUseCount(boost::is_const<typename IterT::NodeType>::value);
-        CPPUNIT_ASSERT(iter.getParentNode() != NULL);
+        incrementIterUseCount(std::is_const<typename IterT::NodeType>::value);
+        CPPUNIT_ASSERT(iter.getParentNode() != nullptr);
 
         if (mSkipLeafNodes && iter.parent().getLevel() == 1) return true;
 
-        typedef typename IterT::NonConstValueType ValueT;
-        typedef typename IterT::ChildNodeType ChildT;
+        using ValueT = typename IterT::NonConstValueType;
+        using ChildT = typename IterT::ChildNodeType;
         ValueT value;
         if (const ChildT* child = iter.probeChild(value)) {
             insertChild<ChildT>(child);
@@ -146,13 +146,13 @@ public:
     openvdb::Index leafCount() const
     {
         NodeMap::const_iterator it = mNodes.find(0);
-        return (it != mNodes.end()) ? it->second.size() : 0;
+        return openvdb::Index((it != mNodes.end()) ? it->second.size() : 0);
     }
     openvdb::Index nonLeafCount() const
     {
         openvdb::Index count = 1; // root node
         for (NodeMap::const_iterator i = mNodes.begin(), e = mNodes.end(); i != e; ++i) {
-            if (i->first != 0) count += i->second.size();
+            if (i->first != 0) count = openvdb::Index(count + i->second.size());
         }
         return count;
     }
@@ -170,7 +170,7 @@ private:
     template<typename ChildT>
     void insertChild(const ChildT* child)
     {
-        if (child != NULL) {
+        if (child != nullptr) {
             const openvdb::Index level = child->getLevel();
             if (!mSkipLeafNodes || level > 0) {
                 mNodes[level].insert(child);
@@ -241,7 +241,7 @@ namespace {
 class Visitor2
 {
 public:
-    typedef std::map<openvdb::Index, std::set<const void*> > NodeMap;
+    using NodeMap = std::map<openvdb::Index, std::set<const void*> >;
 
     Visitor2() { reset(); }
 
@@ -263,8 +263,8 @@ public:
     template<typename AIterT, typename BIterT>
     int operator()(AIterT& aIter, BIterT& bIter)
     {
-        CPPUNIT_ASSERT(aIter.getParentNode() != NULL);
-        CPPUNIT_ASSERT(bIter.getParentNode() != NULL);
+        CPPUNIT_ASSERT(aIter.getParentNode() != nullptr);
+        CPPUNIT_ASSERT(bIter.getParentNode() != nullptr);
 
         typename AIterT::NodeType& aNode = aIter.parent();
         typename BIterT::NodeType& bNode = bIter.parent();
@@ -284,7 +284,7 @@ private:
     {
         const NodeMap& theMap = (useA ? mANodeCount : mBNodeCount);
         NodeMap::const_iterator it = theMap.find(0);
-        if (it != theMap.end()) return it->second.size();
+        if (it != theMap.end()) return openvdb::Index(it->second.size());
         return 0;
     }
     openvdb::Index nonLeafCount(bool useA) const
@@ -292,7 +292,7 @@ private:
         openvdb::Index count = 0;
         const NodeMap& theMap = (useA ? mANodeCount : mBNodeCount);
         for (NodeMap::const_iterator i = theMap.begin(), e = theMap.end(); i != e; ++i) {
-            if (i->first != 0) count += i->second.size();
+            if (i->first != 0) count = openvdb::Index(count + i->second.size());
         }
         return count;
     }
@@ -307,10 +307,9 @@ private:
 void
 TestTreeVisitor::testVisit2Trees()
 {
-    typedef openvdb::FloatTree TreeT;
-    typedef openvdb::VectorTree Tree2T;
-    typedef TreeT::ValueType ValueT;
-    typedef Tree2T::ValueType Value2T;
+    using TreeT = openvdb::FloatTree;
+    using Tree2T = openvdb::VectorTree;
+    using ValueT = TreeT::ValueType;
 
     // Create a test tree.
     TreeT tree = createTestTree<TreeT>();
@@ -371,6 +370,6 @@ TestTreeVisitor::testVisit2Trees()
     CPPUNIT_ASSERT_EQUAL(tree.nonLeafCount(), visitor.bNonLeafCount());
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

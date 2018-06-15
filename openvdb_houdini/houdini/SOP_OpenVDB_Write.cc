@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -37,8 +37,12 @@
 #include <openvdb_houdini/SOP_NodeVDB.h>
 #include <openvdb_houdini/GEO_PrimVDB.h>
 #include <openvdb_houdini/GU_PrimVDB.h>
+#include <PRM/PRM_Parm.h>
 #include <UT/UT_Interrupt.h>
 #include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
@@ -48,19 +52,21 @@ class SOP_OpenVDB_Write: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Write(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Write() {};
+    ~SOP_OpenVDB_Write() override {}
 
-    virtual void getDescriptiveParmName(UT_String& s) const { s = "file_name"; }
+    void getDescriptiveParmName(UT_String& s) const override { s = "file_name"; }
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
     static int writeNowCallback(void* data, int index, float now, const PRM_Template*);
 
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
+    void resolveObsoleteParms(PRM_ParmList*) override;
+
+    OP_ERROR cookVDBSop(OP_Context&) override;
 
     void writeOnNextCook(bool write = true) { mWriteOnNextCook = write; }
 
-    typedef std::set<std::string> StringSet;
+    using StringSet = std::set<std::string>;
     void reportFloatPrecisionConflicts(const StringSet& conflicts);
 
 private:
@@ -76,56 +82,80 @@ private:
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
-    hutil::ParmList parms;
+    hutil::ParmList parms, obsoleteParms;
 
     // File name
     parms.add(hutil::ParmFactory(PRM_FILE, "file_name", "File Name")
         .setDefault(0, "./filename.vdb")
-        .setHelpText("Path name for the output VDB file"));
+        .setTooltip("Path name for the output VDB file"));
 
     // Group
     parms.add(hutil::ParmFactory(PRM_STRING, "group",  "Group")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setHelpText("Write only a subset of the input grids."));
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Write only a subset of the input grids.")
+        .setDocumentation(
+            "Write only a subset of the input VDBs"
+            " (see [specifying volumes|/model/volumes#group])."));
 
     // Compression
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "compress_zip", "Zip Compression")
-        .setDefault(true)
-        .setHelpText(
-            "Apply Zip \"deflate\" compression to non-SDF and non-fog grids.\n"
-            "(Zip compression can be slow for large volumes.)"));
-
-    {   // Write mode (manual/auto)
-
-        const char* items[] = {
-            "manual",   "Manual",
-            "auto",     "Automatic",
-            NULL
+    {
+        char const * const items[] = {
+            "none",     "None",
+            "zip",      "Zip",
+            "blosc",    "Blosc",
+            nullptr
         };
 
-        parms.add(
-            hutil::ParmFactory(PRM_ORD, "writeMode", "Write Mode")
+#ifdef OPENVDB_USE_BLOSC
+        parms.add(hutil::ParmFactory(PRM_ORD, "compression", "Compression")
             .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
-            .setHelpText(
-                "In Manual mode, click the Write Now button\n"
-                "to write the output file.\n"
-                "In Automatic mode, the file is written\n"
-                " each time this node cooks."));
+            .setDefault("blosc")
+            .setTooltip(
+                "Zip is slow but compresses very well.  Blosc is fast and compresses well,\n"
+                "but files written with Blosc cannot be read by older versions of Houdini.\n")
+            .setDocumentation(
+                "[Blosc|http://www.blosc.org] is fast and compresses well."
+                " Zip is slow but compresses very well."
+                " For most cases Blosc is the recommended compression type."));
+
+        obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "compress_zip", "Zip Compression"));
+#else
+        parms.add(hutil::ParmFactory(PRM_TOGGLE, "compress_zip", "Zip Compression")
+            .setDefault(true)
+            .setTooltip(
+                "Apply Zip \"deflate\" compression to non-SDF and non-fog grids.\n"
+                "(Zip compression can be slow for large volumes.)"));
+
+        obsoleteParms.add(hutil::ParmFactory(PRM_ORD, "compression", "Compression")
+            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items));
+#endif
     }
+
+    // Write mode (manual/auto)
+    parms.add(hutil::ParmFactory(PRM_ORD, "writeMode", "Write Mode")
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
+            "manual",   "Manual",
+            "auto",     "Automatic"
+        })
+        .setTooltip(
+            "In Manual mode, click the Write Now button\n"
+            "to write the output file.\n"
+            "In Automatic mode, the file is written\n"
+            "each time this node cooks."));
 
     // "Write Now" button
     parms.add(hutil::ParmFactory(PRM_CALLBACK, "write", "Write Now")
         .setCallbackFunc(&SOP_OpenVDB_Write::writeNowCallback)
-        .setHelpText("Click to write the output file."));
+        .setTooltip("Click to write the output file."));
 
     {   // Float precision
         parms.add(hutil::ParmFactory(PRM_HEADING, "float_header", "Float Precision"));
 
         parms.add(hutil::ParmFactory(PRM_STRING, "float_16_group", "Write 16-Bit")
-            .setChoiceList(&hutil::PrimGroupMenu)
-            .setHelpText(
+            .setChoiceList(&hutil::PrimGroupMenuInput1)
+            .setTooltip(
                 "For grids that belong to the group(s) listed here,\n"
                 "write floating-point scalar or vector voxel values\n"
                 "using 16-bit half floats.\n"
@@ -133,8 +163,8 @@ newSopOperator(OP_OperatorTable* table)
                 "using their existing precision settings."));
 
         parms.add(hutil::ParmFactory(PRM_STRING, "float_full_group", "Write Full-Precision")
-            .setChoiceList(&hutil::PrimGroupMenu)
-            .setHelpText(
+            .setChoiceList(&hutil::PrimGroupMenuInput1)
+            .setTooltip(
                 "For grids that belong to the group(s) listed here,\n"
                 "write floating-point scalar or vector voxel values\n"
                 "using full-precision floats or doubles.\n"
@@ -145,7 +175,55 @@ newSopOperator(OP_OperatorTable* table)
     // Register this operator.
     hvdb::OpenVDBOpFactory("OpenVDB Write", SOP_OpenVDB_Write::factory, parms, *table)
         .addAlias("OpenVDB Writer")
-        .addInput("Input with VDB grids write out");
+        .setObsoleteParms(obsoleteParms)
+        .addInput("VDBs to be written to disk")
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Write a `.vdb` file to disk.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node writes VDB volumes to a `.vdb` file.\n\
+It is usually preferable to use Houdini's native [File|Node:sop/file] node,\n\
+but this node allows one to specify the file compression scheme\n\
+and to control floating-point precision for individual volumes,\n\
+options that are not available on the native node.\n\
+\n\
+@related\n\
+- [OpenVDB Read|Node:sop/DW_OpenVDBRead]\n\
+- [Node:sop/file]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
+}
+
+
+void
+SOP_OpenVDB_Write::resolveObsoleteParms(PRM_ParmList* obsoleteParms)
+{
+    if (!obsoleteParms) return;
+
+#ifdef OPENVDB_USE_BLOSC
+    PRM_Parm* parm = obsoleteParms->getParmPtr("compress_zip");
+    if (parm && !parm->isFactoryDefault()) {
+        const bool zip = obsoleteParms->evalInt("compress_zip", 0, /*time=*/0.0);
+        const UT_String compression(zip ? "zip" : "none");
+        setString(compression, CH_STRING_LITERAL, "compression", 0, 0.0);
+    }
+#else
+    if (nullptr != obsoleteParms->getParmPtr("compression")) {
+        UT_String compression;
+        obsoleteParms->evalString(compression, "compression", 0, /*time=*/0.0);
+        setInt("compress_zip", 0, 0.0, (compression == "zip" ? 1 : 0));
+    }
+#endif
+
+    // Delegate to the base class.
+    hvdb::SOP_NodeVDB::resolveObsoleteParms(obsoleteParms);
 }
 
 
@@ -222,7 +300,7 @@ SOP_OpenVDB_Write::reportFloatPrecisionConflicts(const StringSet& conflicts)
 
 
 OP_ERROR
-SOP_OpenVDB_Write::cookMySop(OP_Context& context)
+SOP_OpenVDB_Write::cookVDBSop(OP_Context& context)
 {
     try {
         hutil::ScopedInputLock lock(*this, context);
@@ -243,9 +321,7 @@ void
 SOP_OpenVDB_Write::doCook(const fpreal time)
 {
     // Get the filename of the output file.
-    UT_String fileNameStr;
-    evalString(fileNameStr, "file_name", 0, time);
-    const std::string filename = fileNameStr.toStdString();
+    const std::string filename = evalStdString("file_name", time);
     if (filename.empty()) {
         addWarning(SOP_MESSAGE, "no name given for the output file");
         return;
@@ -259,8 +335,8 @@ SOP_OpenVDB_Write::doCook(const fpreal time)
 
     const GA_PrimitiveGroup
         *group = matchGroup(*gdp, groupStr.toStdString()),
-        *halfGroup = NULL,
-        *fullGroup = NULL;
+        *halfGroup = nullptr,
+        *fullGroup = nullptr;
     if (halfGroupStr.isstring()) {
         // Normally, an empty group pattern matches all primitives, but
         // for the float precision filters, we want it to match nothing.
@@ -271,7 +347,12 @@ SOP_OpenVDB_Write::doCook(const fpreal time)
     }
 
     // Get compression options.
+#ifdef OPENVDB_USE_BLOSC
+    UT_String compression;
+    evalString(compression, "compression", 0, time);
+#else
     const bool zip = evalInt("compress_zip", 0, time);
+#endif
 
     UT_AutoInterrupt progress(("Writing " + filename).c_str());
 
@@ -290,7 +371,7 @@ SOP_OpenVDB_Write::doCook(const fpreal time)
 
         // Create a new grid that shares the primitive's tree and transform
         // and then transfer primitive attributes to the new grid as metadata.
-        hvdb::GridPtr grid = vdb->getGrid().copyGrid();
+        hvdb::GridPtr grid = openvdb::ConstPtrCast<hvdb::Grid>(vdb->getGrid().copyGrid());
         GU_PrimVDB::createMetadataFromGridAttrs(*grid, *vdb, *gdp);
         grid->removeMeta("is_vdb");
 
@@ -332,13 +413,30 @@ SOP_OpenVDB_Write::doCook(const fpreal time)
 
     // Create a VDB file object.
     openvdb::io::File file(filename);
-    file.setCompressionEnabled(zip);
+
+#ifdef OPENVDB_USE_BLOSC
+    uint32_t compressionFlags = file.compression();
+    if (compression == "none") {
+        compressionFlags &= ~(openvdb::io::COMPRESS_ZIP | openvdb::io::COMPRESS_BLOSC);
+    } else if (compression == "blosc") {
+        compressionFlags &= ~openvdb::io::COMPRESS_ZIP;
+        compressionFlags |= openvdb::io::COMPRESS_BLOSC;
+    } else if (compression == "zip") {
+        compressionFlags |= openvdb::io::COMPRESS_ZIP;
+        compressionFlags &= ~openvdb::io::COMPRESS_BLOSC;
+    }
+#else
+    uint32_t compressionFlags = openvdb::io::COMPRESS_ACTIVE_MASK;
+    if (zip) compressionFlags |= openvdb::io::COMPRESS_ZIP;
+#endif
+    file.setCompression(compressionFlags);
+
     file.write(outGrids, outMeta);
     file.close();
 
     mWriteOnNextCook = false;
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

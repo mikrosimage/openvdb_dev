@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -43,11 +43,12 @@
  */
 
 #include <UT/UT_Version.h>
-#if !defined(SESI_OPENVDB) && (UT_VERSION_INT >= 0x0c050157) // 12.5.343 or later
+
+#ifndef SESI_OPENVDB
 
 #include <UT/UT_VDBUtils.h>
 
-#else // earlier than 12.5.343
+#else
 
 #ifndef __HDK_UT_VDBUtils__
 #define __HDK_UT_VDBUtils__
@@ -63,9 +64,13 @@ enum UT_VDBType
     UT_VDB_VEC3F,
     UT_VDB_VEC3D,
     UT_VDB_VEC3I,
+    UT_VDB_POINTINDEX,
+    UT_VDB_POINTDATA,
 };
 
 #include <openvdb/openvdb.h>
+#include <openvdb/tools/PointIndexGrid.h>
+#include <openvdb/points/PointDataGrid.h>
 
 #include <UT/UT_Assert.h>
 #include <UT/UT_BoundingBox.h>
@@ -73,13 +78,6 @@ enum UT_VDBType
 #include <UT/UT_Matrix3.h>
 #include <UT/UT_Matrix2.h>
 #include <SYS/SYS_Math.h>
-
-#include <boost/typeof/typeof.hpp>
-
-
-#if (UT_VERSION_INT < 0x0c010072) // 12.1.114 or earlier
-#define UTverify_cast static_cast
-#endif
 
 
 /// Calls openvdb::initialize()
@@ -89,22 +87,32 @@ inline void UTvdbInitialize() { openvdb::initialize(); }
 inline UT_VDBType
 UTvdbGetGridType(const openvdb::GridBase &grid)
 {
-    if (grid.isType<openvdb::FloatGrid>())
+    using namespace openvdb;
+    using namespace openvdb::tools;
+    using namespace openvdb::points;
+
+    if (grid.isType<FloatGrid>())
 	return UT_VDB_FLOAT;
-    if (grid.isType<openvdb::DoubleGrid>())
+    if (grid.isType<DoubleGrid>())
 	return UT_VDB_DOUBLE;
-    if (grid.isType<openvdb::Int32Grid>())
+    if (grid.isType<Int32Grid>())
 	return UT_VDB_INT32;
-    if (grid.isType<openvdb::Int64Grid>())
+    if (grid.isType<Int64Grid>())
 	return UT_VDB_INT64;
-    if (grid.isType<openvdb::BoolGrid>())
+    if (grid.isType<BoolGrid>())
 	return UT_VDB_BOOL;
-    if (grid.isType<openvdb::Vec3fGrid>())
+    if (grid.isType<Vec3fGrid>())
 	return UT_VDB_VEC3F;
-    if (grid.isType<openvdb::Vec3dGrid>())
+    if (grid.isType<Vec3dGrid>())
 	return UT_VDB_VEC3D;
-    if (grid.isType<openvdb::Vec3IGrid>())
+    if (grid.isType<Vec3IGrid>())
 	return UT_VDB_VEC3I;
+    if (grid.isType<Vec3IGrid>())
+	return UT_VDB_VEC3I;
+    if (grid.isType<PointIndexGrid>())
+	return UT_VDB_POINTINDEX;
+    if (grid.isType<PointDataGrid>())
+	return UT_VDB_POINTDATA;
 
     return UT_VDB_INVALID;
 }
@@ -131,6 +139,10 @@ UTvdbGetGridTypeString(const openvdb::GridBase &grid)
 	return "Vec3d";
     case UT_VDB_VEC3I:
 	return "Vec3i";
+    case UT_VDB_POINTINDEX:
+	return "PointIndex";
+    case UT_VDB_POINTDATA:
+	return "PointData";
     default:
 	return "invalid type";
     }
@@ -154,6 +166,8 @@ UTvdbGetGridTupleSize(UT_VDBType type)
     case UT_VDB_VEC3I:
 	return 3;
 
+    case UT_VDB_POINTINDEX:
+    case UT_VDB_POINTDATA:
     case UT_VDB_INVALID:
     default:
 	break;
@@ -256,7 +270,7 @@ callTypedGrid(GridBaseType &grid, OpType& op)
 ///
 ///     template<typename GridT>
 ///     void operator()(GridT& grid) const {
-///         typedef typename GridT::ValueType ValueT;
+///         using ValueT = typename GridT::ValueType;
 ///         grid.fill(bbox, ValueT(1));
 ///     }
 /// };
@@ -285,7 +299,7 @@ UTvdbProcessTypedGrid(UT_VDBType grid_type, GRID_BASE_T grid, OpType& op) \
 	case UT_VDB_VEC3F:  callTypedGrid<Vec3SGrid>(grid, op); break; \
 	case UT_VDB_VEC3D:  callTypedGrid<Vec3DGrid>(grid, op); break; \
 	case UT_VDB_VEC3I:  callTypedGrid<Vec3IGrid>(grid, op); break; \
-	default:	    UT_ASSERT(!"Unknown grid type"); return false; \
+	default: return false; \
     } \
     return true; \
 } \
@@ -305,7 +319,7 @@ UTvdbProcessTypedGridTopology(UT_VDBType grid_type, GRID_BASE_T grid, OpType& op
 	case UT_VDB_VEC3D:  callTypedGrid<Vec3DGrid>(grid, op); break; \
 	case UT_VDB_VEC3I:  callTypedGrid<Vec3IGrid>(grid, op); break; \
 	case UT_VDB_BOOL:   callTypedGrid<BoolGrid>(grid, op); break; \
-	default:	    UT_ASSERT(!"Unknown grid type"); return false; \
+	default: return false; \
     } \
     return true; \
 } \
@@ -351,6 +365,22 @@ UTvdbProcessTypedGridReal(UT_VDBType grid_type, GRID_BASE_T grid, OpType& op) \
 	case UT_VDB_FLOAT:  callTypedGrid<FloatGrid>(grid, op); break; \
 	case UT_VDB_DOUBLE: callTypedGrid<DoubleGrid>(grid, op); break; \
 	default:	    return false; \
+    } \
+    return true; \
+} \
+template<typename OpType> \
+inline bool \
+UTvdbProcessTypedGridPoint(UT_VDBType grid_type, GRID_BASE_T grid, OpType& op) \
+{ \
+    using namespace openvdb; \
+    using namespace openvdb::tools; \
+    using namespace openvdb::points; \
+    using namespace UT_VDBUtils; \
+    switch (grid_type) \
+    { \
+	case UT_VDB_POINTINDEX:	callTypedGrid<PointIndexGrid>(grid, op); break; \
+	case UT_VDB_POINTDATA:  callTypedGrid<PointDataGrid>(grid, op); break; \
+	default:		return false; \
     } \
     return true; \
 } \
@@ -407,17 +437,24 @@ UT_VDB_DECL_PROCESS_TYPED_GRID(openvdb::GridBase::Ptr)
     else if (TYPE == UT_VDB_VEC3I)	\
 	UT_VDB_CALL(openvdb::Vec3IGrid,(void),FNAME,GRIDBASE,__VA_ARGS__) \
     /**/
+#define UTvdbCallPointType(TYPE, FNAME, GRIDBASE, ...)	\
+    if (TYPE == UT_VDB_POINTINDEX)	\
+	UT_VDB_CALL(openvdb::tools::PointIndexGrid,(void),FNAME,GRIDBASE,__VA_ARGS__) \
+    else if (TYPE == UT_VDB_POINTDATA)	\
+	UT_VDB_CALL(openvdb::points::PointDataGrid,(void),FNAME,GRIDBASE,__VA_ARGS__) \
+    /**/
+#define UTvdbCallBoolType(TYPE, FNAME, GRIDBASE, ...)	\
+    if (TYPE == UT_VDB_BOOL) \
+	UT_VDB_CALL(openvdb::BoolGrid,(void),FNAME,GRIDBASE,__VA_ARGS__) \
+    /**/
 #define UTvdbCallAllType(TYPE, FNAME, GRIDBASE, ...)	\
     UTvdbCallScalarType(TYPE, FNAME, GRIDBASE, __VA_ARGS__)		\
-    else UTvdbCallVec3Type(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
-    else UT_ASSERT(!"Unknown grid type"); \
+    else UTvdbCallVec3Type(TYPE, FNAME, GRIDBASE, __VA_ARGS__); \
     /**/
 #define UTvdbCallAllTopology(TYPE, FNAME, GRIDBASE, ...)	\
     UTvdbCallScalarType(TYPE, FNAME, GRIDBASE, __VA_ARGS__)		\
     else UTvdbCallVec3Type(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
-    else if (TYPE == UT_VDB_BOOL) \
-	UT_VDB_CALL(openvdb::BoolGrid,(void),FNAME,GRIDBASE,__VA_ARGS__) \
-    else UT_ASSERT(!"Unknown grid type"); \
+    else UTvdbCallBoolType(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
     /**/
 //@}
 
@@ -460,17 +497,24 @@ UT_VDB_DECL_PROCESS_TYPED_GRID(openvdb::GridBase::Ptr)
     else if (TYPE == UT_VDB_VEC3I)	\
 	UT_VDB_CALL(openvdb::Vec3IGrid,return,FNAME,GRIDBASE,__VA_ARGS__) \
     /**/
+#define UTvdbReturnPointType(TYPE, FNAME, GRIDBASE, ...)	\
+    if (TYPE == UT_VDB_POINTINDEX)	\
+	UT_VDB_CALL(openvdb::tools::PointIndexGrid,return,FNAME,GRIDBASE,__VA_ARGS__) \
+    else if (TYPE == UT_VDB_POINTDATA)	\
+	UT_VDB_CALL(openvdb::points::PointDataGrid,return,FNAME,GRIDBASE,__VA_ARGS__) \
+    /**/
+#define UTvdbReturnBoolType(TYPE, FNAME, GRIDBASE, ...)		\
+    if (TYPE == UT_VDB_BOOL) \
+	UT_VDB_CALL(openvdb::BoolGrid,return,FNAME,GRIDBASE,__VA_ARGS__) \
+    /**/
 #define UTvdbReturnAllType(TYPE, FNAME, GRIDBASE, ...)	\
     UTvdbReturnScalarType(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
-    else UTvdbReturnVec3Type(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
-    else UT_ASSERT(!"Unknown grid type"); \
+    else UTvdbReturnVec3Type(TYPE, FNAME, GRIDBASE, __VA_ARGS__); \
     /**/
 #define UTvdbReturnAllTopology(TYPE, FNAME, GRIDBASE, ...)	\
     UTvdbReturnScalarType(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
     else UTvdbReturnVec3Type(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
-    else if (TYPE == UT_VDB_BOOL) \
-	UT_VDB_CALL(openvdb::BoolGrid,return,FNAME,GRIDBASE,__VA_ARGS__) \
-    else UT_ASSERT(!"Unknown grid type"); \
+    else UTvdbReturnBoolType(TYPE, FNAME, GRIDBASE, __VA_ARGS__) \
     /**/
 //@}
 
@@ -589,6 +633,29 @@ UTvdbConvert(const openvdb::CoordBBox &bbox)
 	UTvdbConvert(bbox.getEnd().asVec3d()));
 }
 
+/// Bounding box conversion from openvdb to UT
+inline openvdb::math::CoordBBox
+UTvdbConvert(const UT_BoundingBoxI &bbox)
+{
+    return openvdb::math::CoordBBox(
+	openvdb::math::Coord(bbox.xmin(), bbox.ymin(), bbox.zmin()),
+	openvdb::math::Coord(bbox.xmax(), bbox.ymax(), bbox.zmax()));
+}
+
+/// Utility method to construct a Transform that lines up with a
+/// cell-centered Houdini volume with specified origin and voxel size.
+inline openvdb::math::Transform::Ptr
+UTvdbCreateTransform(const UT_Vector3 &orig, const UT_Vector3 &voxsize)
+{
+    // Transforms only valid for square voxels.
+    UT_ASSERT(SYSalmostEqual(voxsize.minComponent(), voxsize.maxComponent()));
+    fpreal vs = voxsize.maxComponent();
+    openvdb::math::Transform::Ptr xform =
+			    openvdb::math::Transform::createLinearTransform(vs);
+    // Ensure voxel centers line up.
+    xform->postTranslate(UTvdbConvert(orig) + vs / 2);
+    return xform;
+}
 
 template <typename T>
 inline openvdb::math::Vec4<T>	SYSabs(const openvdb::math::Vec4<T> &v1)
@@ -701,6 +768,6 @@ inline openvdb::math::Vec2<T>	SYSmax(const openvdb::math::Vec2<T> &v1, const ope
 
 #endif // UT_VERSION_INT < 0x0c050157 // earlier than 12.5.343
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -36,8 +36,16 @@
 #include <openvdb_houdini/Utils.h>
 #include <openvdb_houdini/SOP_NodeVDB.h>
 #include <UT/UT_Interrupt.h>
+#include <UT/UT_Version.h>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
@@ -47,26 +55,40 @@ class SOP_OpenVDB_Metadata: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Metadata(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Metadata() {};
+    ~SOP_OpenVDB_Metadata() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions { OP_ERROR cookVDBSop(OP_Context&) override; };
+#else
 protected:
-    virtual bool updateParmsFlags();
-    virtual OP_ERROR cookMySop(OP_Context&);
+    OP_ERROR cookVDBSop(OP_Context&) override;
+#endif
+
+protected:
+    bool updateParmsFlags() override;
 };
 
 
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
     parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
-        .setHelpText("Specify a subset of the input VDB grids to be modified.")
-        .setChoiceList(&hutil::PrimGroupMenu));
+        .setTooltip("Specify a subset of the input VDBs to be modified.")
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setDocumentation(
+            "A subset of the input VDBs to be modified"
+            " (see [specifying volumes|/model/volumes#group])"));
+
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "setname", "")
+        .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
+    parms.add(hutil::ParmFactory(PRM_STRING, "name", "Name")
+        .setTooltip("The name of the VDB"));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "setclass", "")
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
@@ -80,22 +102,40 @@ newSopOperator(OP_OperatorTable* table)
         parms.add(
             hutil::ParmFactory(PRM_STRING, "class", "Class")
             .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
-            .setHelpText("Specify how the grid's values should be interpreted."));
+            .setTooltip("Specify how voxel values should be interpreted.")
+            .setDocumentation("\
+How voxel values should be interpreted\n\
+\n\
+Fog Volume:\n\
+    The volume represents a density field.  Values should be positive,\n\
+    with zero representing empty regions.\n\
+Level Set:\n\
+    The volume is treated as a narrow-band signed distance field level set.\n\
+    The voxels within a certain distance&mdash;the \"narrow band width\"&mdash;of\n\
+    an isosurface are expected to define positive (exterior) and negative (interior)\n\
+    distances to the surface.  Outside the narrow band, the distance value\n\
+    is constant and equal to the band width.\n\
+Staggered Vector Field:\n\
+    If the volume is vector-valued, the _x_, _y_ and _z_ vector components\n\
+    are to be treated as lying on the respective faces of voxels,\n\
+    not at their centers.\n\
+Other:\n\
+    No special meaning is assigned to the volume's data.\n"));
     }
 
     /// @todo Do we really need to expose this?
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "setcreator", "")
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
     parms.add(hutil::ParmFactory(PRM_STRING, "creator", "Creator")
-        .setHelpText("Specify who created the grid."));
+        .setTooltip("Who (or what node) created the VDB"));
 
     /// @todo Currently, no SOP pays attention to this setting.
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "setworld", "")
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "world", "Transform Values")
         .setDefault(PRMzeroDefaults)
-        .setHelpText(
-            "For vector-valued grids, specify whether voxel values\n"
+        .setTooltip(
+            "For vector-valued VDBs, specify whether voxel values\n"
             "are in world space and should be affected by transforms\n"
             "or in local space and should not be transformed."));
 
@@ -103,32 +143,78 @@ newSopOperator(OP_OperatorTable* table)
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
     {
         std::string help =
-            "For vector-valued grids, specify how voxel values are affected by transforms:\n";
+            "For vector-valued VDBs, specify an interpretation of the vectors"
+            " that determines how they are affected by transforms.\n";
         std::vector<std::string> items;
         for (int n = 0; n < openvdb::NUM_VEC_TYPES; ++n) {
-            openvdb::VecType vectype = static_cast<openvdb::VecType>(n);
+            const auto vectype = static_cast<openvdb::VecType>(n);
             items.push_back(openvdb::GridBase::vecTypeToString(vectype));
             items.push_back(openvdb::GridBase::vecTypeExamples(vectype));
             help += "\n" + openvdb::GridBase::vecTypeExamples(vectype) + "\n    "
                 + openvdb::GridBase::vecTypeDescription(vectype) + ".";
         }
-        parms.add(
-            hutil::ParmFactory(PRM_STRING, "vectype", "Vector Type")
+        parms.add(hutil::ParmFactory(PRM_STRING, "vectype", "Vector Type")
             .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
-            .setHelpText(::strdup(help.c_str())));
+            .setTooltip(::strdup(help.c_str())));
     }
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "setfloat16", "")
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "float16", "Write 16-Bit Floats")
         .setDefault(PRMzeroDefaults)
-        .setHelpText(
-            "When saving the grid to a file, write floating-point\n"
+        .setTooltip(
+            "When saving the VDB to a file, write floating-point\n"
             "scalar or vector voxel values as 16-bit half floats."));
+
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "syncattrs", "Transfer Metadata to Attributes")
+        .setDefault(PRMoneDefaults)
+        .setTooltip("Transfer all standard metadata values to intrinsic primitive attributes.")
+        .setDocumentation(
+            "Transfer all standard metadata values to intrinsic primitive attributes,\n"
+            "whether or not any of the above values were changed."));
+
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "syncmetadata", "Transfer Attributes to Metadata")
+        .setDefault(PRMzeroDefaults)
+        .setTooltip("Transfer all standard intrinsic primitive attribute values to metadata.")
+        .setDocumentation(
+            "Transfer all standard intrinsic primitive attribute values to metadata,\n"
+            "whether or not any of the above values were changed."));
 
     // Register this operator.
     hvdb::OpenVDBOpFactory("OpenVDB Metadata", SOP_OpenVDB_Metadata::factory, parms, *table)
-        .addInput("Input with VDB grids");
+        .addInput("Input with VDBs")
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Metadata::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Modify the metadata associated with a VDB volume.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node allows one to create and edit\n\
+[metadata|http://www.openvdb.org/documentation/doxygen/codeExamples.html#sHandlingMetadata]\n\
+attached to a VDB volume.\n\
+Some standard VDB metadata, such as the\n\
+[grid class|http://www.openvdb.org/documentation/doxygen/overview.html#secGrid],\n\
+is exposed via intrinsic attributes on the primitive and can be viewed\n\
+and in some cases edited either from the [geometry spreadsheet|/ref/panes/geosheet]\n\
+or with the [Node:sop/attribcreate] node, but changes to attribute values\n\
+made through those means are typically not propagated immediately, if at all,\n\
+to a VDB's metadata.\n\
+This node provides more direct access to the standard VDB metadata.\n\
+\n\
+@related\n\
+- [OpenVDB Create|Node:sop/DW_OpenVDBCreate]\n\
+- [Node:sop/attribcreate]\n\
+- [Node:sop/name]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -138,11 +224,12 @@ SOP_OpenVDB_Metadata::updateParmsFlags()
     bool changed = false;
     const fpreal time = 0; // No point using CHgetTime as that is unstable.
 
-    changed |= enableParm("class",   evalInt("setclass", 0, time));
-    changed |= enableParm("creator", evalInt("setcreator", 0, time));
-    changed |= enableParm("float16", evalInt("setfloat16", 0, time));
-    changed |= enableParm("world",   evalInt("setworld", 0, time));
-    changed |= enableParm("vectype", evalInt("setvectype", 0, time));
+    changed |= enableParm("name",    bool(evalInt("setname", 0, time)));
+    changed |= enableParm("class",   bool(evalInt("setclass", 0, time)));
+    changed |= enableParm("creator", bool(evalInt("setcreator", 0, time)));
+    changed |= enableParm("float16", bool(evalInt("setfloat16", 0, time)));
+    changed |= enableParm("world",   bool(evalInt("setworld", 0, time)));
+    changed |= enableParm("vectype", bool(evalInt("setvectype", 0, time)));
 
     return changed;
 }
@@ -164,42 +251,46 @@ SOP_OpenVDB_Metadata::SOP_OpenVDB_Metadata(OP_Network* net,
 
 
 OP_ERROR
-SOP_OpenVDB_Metadata::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Metadata)::cookVDBSop(OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
-
-        const fpreal time = context.getTime();
 
         // This does a shallow copy of VDB-grids and deep copy of native Houdini primitives.
         duplicateSource(0, context);
+#endif
+
+        const fpreal time = context.getTime();
 
         // Get UI parameter values.
         const bool
+            setname = evalInt("setname", 0, time),
             setclass = evalInt("setclass", 0, time),
             setcreator = evalInt("setcreator", 0, time),
             setfloat16 = evalInt("setfloat16", 0, time),
-            float16 = evalInt("float16", 0, time),
             setvectype = evalInt("setvectype", 0, time),
             setworld = evalInt("setworld", 0, time),
-            world = evalInt("world", 0, time);
+            syncattrs = evalInt("syncattrs", 0, time),
+            syncmetadata = evalInt("syncmetadata", 0, time);
 
-        UT_String s;
-        evalString(s, "creator", 0, time);
-        const std::string creator = s.toStdString();
+        if (!(setname || setclass || setcreator || setfloat16 || setvectype || setworld
+            || syncattrs || syncmetadata))
+        {
+            return error();
+        }
 
-        evalString(s, "class", 0, time);
-        const openvdb::GridClass gridclass =
-            openvdb::GridBase::stringToGridClass(s.toStdString());
-
-        evalString(s, "vectype", 0, time);
-        const openvdb::VecType vectype =
-            openvdb::GridBase::stringToVecType(s.toStdString());
+        const bool float16 = (!setfloat16 ? false : evalInt("float16", 0, time));
+        const bool world = (!setworld ? false : evalInt("world", 0, time));
+        const std::string name = (!setname ? std::string{} : evalStdString("name", time));
+        const std::string creator = (!setcreator ? std::string{} : evalStdString("creator", time));
+        const openvdb::GridClass gridclass = (!setclass ? openvdb::GRID_UNKNOWN
+            : openvdb::GridBase::stringToGridClass(evalStdString("class", time)));
+        const openvdb::VecType vectype = (!setvectype ? openvdb::VEC_INVARIANT
+            : openvdb::GridBase::stringToVecType(evalStdString("vectype", time)));
 
         // Get the group of grids to be modified.
-        UT_String groupStr;
-        evalString(groupStr, "group", 0, time);
-        const GA_PrimitiveGroup* group = matchGroup(*gdp, groupStr.toStdString());
+        const GA_PrimitiveGroup* group = matchGroup(*gdp, evalStdString("group", time));
 
         UT_AutoInterrupt progress("Set VDB grid metadata");
 
@@ -213,11 +304,34 @@ SOP_OpenVDB_Metadata::cookMySop(OP_Context& context)
             hvdb::Grid& grid = vdb->getGrid();
 
             // Set various grid metadata items.
-            if (setclass)   grid.setGridClass(gridclass);
+            if (setname)    grid.setName(name);
             if (setcreator) grid.setCreator(creator);
             if (setfloat16) grid.setSaveFloatAsHalf(float16);
             if (setvectype) grid.setVectorType(vectype);
             if (setworld)   grid.setIsInWorldSpace(world);
+            if (setclass) {
+                grid.setGridClass(gridclass);
+
+                // Update viewport visualization options.
+                switch (gridclass) {
+                    case openvdb::GRID_LEVEL_SET:
+                    case openvdb::GRID_FOG_VOLUME:
+                    {
+                        const GEO_VolumeOptions& visOps = vdb->getVisOptions();
+                        vdb->setVisualization(
+                            ((gridclass == openvdb::GRID_LEVEL_SET) ?
+                                GEO_VOLUMEVIS_ISO : GEO_VOLUMEVIS_SMOKE),
+                            visOps.myIso, visOps.myDensity);
+                        break;
+                    }
+                    default: break;
+                }
+            }
+
+            // Optionally transfer metadata to primitive attributes.
+            if (syncattrs) vdb->syncAttrsFromMetadata();
+            // Optionally transfer primitive attributes to metadata.
+            if (syncmetadata) GU_PrimVDB::createMetadataFromGridAttrs(grid, *vdb, *gdp);
         }
     } catch (std::exception& e) {
         addError(SOP_MESSAGE, e.what());
@@ -225,6 +339,6 @@ SOP_OpenVDB_Metadata::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

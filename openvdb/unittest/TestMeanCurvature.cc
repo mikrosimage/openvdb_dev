@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -28,23 +28,20 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 
-#include <sstream>
-#include <cppunit/extensions/HelperMacros.h>
 #include <openvdb/Types.h>
 #include <openvdb/openvdb.h>
 #include <openvdb/math/Stencils.h>
 #include <openvdb/math/Operators.h>
 #include <openvdb/tools/GridOperators.h>
 #include "util.h" // for unittest_util::makeSphere()
+#include <cppunit/extensions/HelperMacros.h>
 
-#define ASSERT_DOUBLES_EXACTLY_EQUAL(expected, actual) \
-    CPPUNIT_ASSERT_DOUBLES_EQUAL((expected), (actual), /*tolerance=*/0.0);
 
 class TestMeanCurvature: public CppUnit::TestFixture
 {
 public:
-    virtual void setUp() { openvdb::initialize(); }
-    virtual void tearDown() { openvdb::uninitialize(); }
+    void setUp() override { openvdb::initialize(); }
+    void tearDown() override { openvdb::uninitialize(); }
 
     CPPUNIT_TEST_SUITE(TestMeanCurvature);
     CPPUNIT_TEST(testISMeanCurvature);                    // MeanCurvature in Index Space
@@ -92,7 +89,7 @@ TestMeanCurvature::testISMeanCurvature()
 
     typedef math::ISMeanCurvature<math::CD_SIXTH, math::CD_6TH> SixthOrder;
     CPPUNIT_ASSERT(!SixthOrder::result(inAccessor, xyz, alpha, beta));
-    
+
     // Next test a level set sphere
     const openvdb::Coord dim(64,64,64);
     const openvdb::Vec3f center(35.0f ,30.0f, 40.0f);
@@ -100,7 +97,7 @@ TestMeanCurvature::testISMeanCurvature()
     unittest_util::makeSphere<FloatGrid>(dim, center, radius, *grid, unittest_util::SPHERE_DENSE);
 
     CPPUNIT_ASSERT(!tree.empty());
-    
+
     SecondOrder::result(inAccessor, xyz, alpha, beta);
 
     meancurv = alpha/(2*math::Pow3(beta) );
@@ -157,7 +154,7 @@ TestMeanCurvature::testISMeanCurvatureStencil()
 
     // First test on an empty grid
     CPPUNIT_ASSERT(tree.empty());
-    
+
     typedef math::ISMeanCurvature<math::CD_SECOND, math::CD_2ND> SecondOrder;
     CPPUNIT_ASSERT(!SecondOrder::result(dense_2nd, alpha, beta));
 
@@ -177,7 +174,7 @@ TestMeanCurvature::testISMeanCurvatureStencil()
     dense_6th.moveTo(xyz);
 
     CPPUNIT_ASSERT(!tree.empty());
-    
+
     CPPUNIT_ASSERT(SecondOrder::result(dense_2nd, alpha, beta));
 
     AccessorType::ValueType meancurv = alpha/(2*math::Pow3(beta) );
@@ -241,7 +238,7 @@ TestMeanCurvature::testWSMeanCurvature()
             affine, inAccessor, xyz);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, meancurv, 0.0);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, normGrad, 0.0);
-        
+
         meancurv = math::MeanCurvature<AffineMap, math::CD_FOURTH, math::CD_4TH>::result(
             affine, inAccessor, xyz);
         normGrad = math::MeanCurvature<AffineMap, math::CD_FOURTH, math::CD_4TH>::normGrad(
@@ -447,7 +444,7 @@ TestMeanCurvature::testWSMeanCurvatureStencil()
             affine, dense_2nd);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, meancurv, 0.0);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, normGrad, 0.00);
-        
+
         meancurv = math::MeanCurvature<AffineMap, math::CD_FOURTH, math::CD_4TH>::result(
             affine, dense_4th);
         normGrad = math::MeanCurvature<AffineMap, math::CD_FOURTH, math::CD_4TH>::normGrad(
@@ -675,11 +672,11 @@ TestMeanCurvature::testMeanCurvatureMaskedTool()
 
     CPPUNIT_ASSERT(!tree.empty());
 
-    
+
     const openvdb::CoordBBox maskbbox(openvdb::Coord(35, 30, 30), openvdb::Coord(41, 41, 41));
     BoolGrid::Ptr maskGrid = BoolGrid::create(false);
     maskGrid->fill(maskbbox, true/*value*/, true/*activate*/);
-    
+
 
     FloatGrid::Ptr curv = tools::meanCurvature(*grid, *maskGrid);
     FloatGrid::ConstAccessor accessor = curv->getConstAccessor();
@@ -713,7 +710,7 @@ TestMeanCurvature::testOldStyleStencils()
         // First test on an empty grid
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, cs.meanCurvature(), 0.0);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, cs.meanCurvatureNormGrad(), 0.0);
-        
+
         // Next test on a level set sphere
         const openvdb::Coord dim(32,32,32);
         const openvdb::Vec3f center(6.0f, 8.0f, 10.0f);//i.e. (12,16,20) in index space
@@ -724,7 +721,7 @@ TestMeanCurvature::testOldStyleStencils()
         CPPUNIT_ASSERT(!grid->empty());
         CPPUNIT_ASSERT_EQUAL(dim[0]*dim[1]*dim[2], int(grid->activeVoxelCount()));
         cs.moveTo(xyz);
-        
+
         CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0/4.0, cs.meanCurvature(), 0.01);// 1/distance from center
         CPPUNIT_ASSERT_DOUBLES_EQUAL(
             1.0/4.0, cs.meanCurvatureNormGrad(), 0.01);// 1/distance from center
@@ -737,6 +734,6 @@ TestMeanCurvature::testOldStyleStencils()
     }
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

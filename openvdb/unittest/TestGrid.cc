@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -28,7 +28,6 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 
-#include <cppunit/extensions/HelperMacros.h>
 #include <openvdb/Exceptions.h>
 #include <openvdb/openvdb.h>
 #include <openvdb/Types.h>
@@ -36,7 +35,9 @@
 #include <openvdb/math/Transform.h>
 #include <openvdb/Grid.h>
 #include <openvdb/tree/Tree.h>
-
+#include <openvdb/util/CpuTimer.h>
+#include <cppunit/extensions/HelperMacros.h>
+#include <iostream>
 
 #define ASSERT_DOUBLES_EXACTLY_EQUAL(expected, actual) \
     CPPUNIT_ASSERT_DOUBLES_EQUAL((expected), (actual), /*tolerance=*/0.0);
@@ -52,6 +53,7 @@ public:
     CPPUNIT_TEST(testTransform);
     CPPUNIT_TEST(testCopyGrid);
     CPPUNIT_TEST(testValueConversion);
+    CPPUNIT_TEST(testClipping);
     CPPUNIT_TEST_SUITE_END();
 
     void testGridRegistry();
@@ -61,6 +63,7 @@ public:
     void testTransform();
     void testCopyGrid();
     void testValueConversion();
+    void testClipping();
 };
 
 CPPUNIT_TEST_SUITE_REGISTRATION(TestGrid);
@@ -72,65 +75,83 @@ CPPUNIT_TEST_SUITE_REGISTRATION(TestGrid);
 class ProxyTree: public openvdb::TreeBase
 {
 public:
-    typedef int ValueType;
-    typedef void ValueAllCIter;
-    typedef void ValueAllIter;
-    typedef void ValueOffCIter;
-    typedef void ValueOffIter;
-    typedef void ValueOnCIter;
-    typedef void ValueOnIter;
-    typedef openvdb::TreeBase::Ptr TreeBasePtr;
-    typedef boost::shared_ptr<ProxyTree> Ptr;
-    typedef boost::shared_ptr<const ProxyTree> ConstPtr;
+    using ValueType = int;
+    using BuildType = int;
+    using LeafNodeType = void;
+    using ValueAllCIter = void;
+    using ValueAllIter = void;
+    using ValueOffCIter = void;
+    using ValueOffIter = void;
+    using ValueOnCIter = void;
+    using ValueOnIter = void;
+    using TreeBasePtr = openvdb::TreeBase::Ptr;
+    using Ptr = openvdb::SharedPtr<ProxyTree>;
+    using ConstPtr = openvdb::SharedPtr<const ProxyTree>;
 
     static const openvdb::Index DEPTH;
     static const ValueType backg;
 
     ProxyTree() {}
     ProxyTree(const ValueType&) {}
-    virtual ~ProxyTree() {}
+    ProxyTree(const ProxyTree&) = default;
+    ~ProxyTree() override = default;
 
     static const openvdb::Name& treeType() { static const openvdb::Name s("proxy"); return s; }
-    virtual const openvdb::Name& type() const { return treeType(); }
-    virtual openvdb::Name valueType() const { return "proxy"; }
+    const openvdb::Name& type() const override { return treeType(); }
+    openvdb::Name valueType() const override { return "proxy"; }
     const ValueType& background() const { return backg; }
 
-    virtual TreeBasePtr copy() const { return TreeBasePtr(new ProxyTree(*this)); }
+    TreeBasePtr copy() const override { return TreeBasePtr(new ProxyTree(*this)); }
 
-    virtual void readTopology(std::istream& is, bool = false) { is.seekg(0, std::ios::beg); }
-    virtual void writeTopology(std::ostream& os, bool = false) const { os.seekp(0); }
+    void readTopology(std::istream& is, bool = false) override { is.seekg(0, std::ios::beg); }
+    void writeTopology(std::ostream& os, bool = false) const override { os.seekp(0); }
 
-    virtual void readBuffers(std::istream& is, bool /*saveFloatAsHalf*/=false) { is.seekg(0); }
-    virtual void writeBuffers(std::ostream& os, bool /*saveFloatAsHalf*/=false) const
+#if OPENVDB_ABI_VERSION_NUMBER >= 3
+    void readBuffers(std::istream& is,
+        const openvdb::CoordBBox&, bool /*saveFloatAsHalf*/=false) override { is.seekg(0); }
+    void readNonresidentBuffers() const override {}
+#endif
+    void readBuffers(std::istream& is, bool /*saveFloatAsHalf*/=false) override { is.seekg(0); }
+    void writeBuffers(std::ostream& os, bool /*saveFloatAsHalf*/=false) const override
         { os.seekp(0, std::ios::beg); }
 
     bool empty() const { return true; }
     void clear() {}
     void prune(const ValueType& = 0) {}
+    void clip(const openvdb::CoordBBox&) {}
+#if OPENVDB_ABI_VERSION_NUMBER >= 3
+    void clipUnallocatedNodes() override {}
+#endif
+#if OPENVDB_ABI_VERSION_NUMBER >= 4
+    openvdb::Index32 unallocatedLeafCount() const override { return 0; }
+#endif
 
-    virtual void getIndexRange(openvdb::CoordBBox&) const {}
-    virtual bool evalLeafBoundingBox(openvdb::CoordBBox& bbox) const
+    void getIndexRange(openvdb::CoordBBox&) const override {}
+    bool evalLeafBoundingBox(openvdb::CoordBBox& bbox) const override
         { bbox.min() = bbox.max() = openvdb::Coord(0, 0, 0); return false; }
-    virtual bool evalActiveVoxelBoundingBox(openvdb::CoordBBox& bbox) const
+    bool evalActiveVoxelBoundingBox(openvdb::CoordBBox& bbox) const override
         { bbox.min() = bbox.max() = openvdb::Coord(0, 0, 0); return false; }
-    virtual bool evalActiveVoxelDim(openvdb::Coord& dim) const
+    bool evalActiveVoxelDim(openvdb::Coord& dim) const override
         { dim = openvdb::Coord(0, 0, 0); return false; }
-    virtual bool evalLeafDim(openvdb::Coord& dim) const
+    bool evalLeafDim(openvdb::Coord& dim) const override
         { dim = openvdb::Coord(0, 0, 0); return false; }
 
-    virtual openvdb::Index treeDepth() const { return 0; }
-    virtual openvdb::Index leafCount() const { return 0; }
-    virtual openvdb::Index nonLeafCount() const { return 0; }
-    virtual openvdb::Index64 activeVoxelCount() const { return 0UL; }
-    virtual openvdb::Index64 inactiveVoxelCount() const { return 0UL; }
-    virtual openvdb::Index64 activeLeafVoxelCount() const { return 0UL; }
-    virtual openvdb::Index64 inactiveLeafVoxelCount() const { return 0UL; }
+    openvdb::Index treeDepth() const override { return 0; }
+    openvdb::Index leafCount() const override { return 0; }
+    openvdb::Index nonLeafCount() const override { return 0; }
+    openvdb::Index64 activeVoxelCount() const override { return 0UL; }
+    openvdb::Index64 inactiveVoxelCount() const override { return 0UL; }
+    openvdb::Index64 activeLeafVoxelCount() const override { return 0UL; }
+    openvdb::Index64 inactiveLeafVoxelCount() const override { return 0UL; }
+#if OPENVDB_ABI_VERSION_NUMBER >= 3
+    openvdb::Index64 activeTileCount() const override { return 0UL; }
+#endif
 };
 
 const openvdb::Index ProxyTree::DEPTH = 0;
 const ProxyTree::ValueType ProxyTree::backg = 0;
 
-typedef openvdb::Grid<ProxyTree> ProxyGrid;
+using ProxyGrid = openvdb::Grid<ProxyTree>;
 
 
 ////////////////////////////////////////
@@ -140,8 +161,8 @@ TestGrid::testGridRegistry()
 {
     using namespace openvdb::tree;
 
-    typedef Tree<RootNode<InternalNode<LeafNode<float, 3>, 2> > > TreeType;
-    typedef openvdb::Grid<TreeType> GridType;
+    using TreeType = Tree<RootNode<InternalNode<LeafNode<float, 3>, 2> > >;
+    using GridType = openvdb::Grid<TreeType>;
 
     openvdb::GridBase::clearRegistry();
 
@@ -326,11 +347,118 @@ TestGrid::testValueConversion()
 
     // Verify that a grid can't be converted to another type with a different
     // tree configuration.
-    typedef tree::Tree3<double, 2, 3>::Type DTree23;
-    typedef Grid<DTree23> DGrid23;
+    using DTree23 = tree::Tree3<double, 2, 3>::Type;
+    using DGrid23 = Grid<DTree23>;
     CPPUNIT_ASSERT_THROW(DGrid23 d23grid(fgrid), openvdb::TypeError);
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+
+////////////////////////////////////////
+
+
+template<typename GridT>
+void
+validateClippedGrid(const GridT& clipped, const typename GridT::ValueType& fg)
+{
+    using namespace openvdb;
+
+    using ValueT = typename GridT::ValueType;
+
+    const CoordBBox bbox = clipped.evalActiveVoxelBoundingBox();
+    CPPUNIT_ASSERT_EQUAL(4, bbox.min().x());
+    CPPUNIT_ASSERT_EQUAL(4, bbox.min().y());
+    CPPUNIT_ASSERT_EQUAL(-6, bbox.min().z());
+    CPPUNIT_ASSERT_EQUAL(4, bbox.max().x());
+    CPPUNIT_ASSERT_EQUAL(4, bbox.max().y());
+    CPPUNIT_ASSERT_EQUAL(6, bbox.max().z());
+    CPPUNIT_ASSERT_EQUAL(6 + 6 + 1, int(clipped.activeVoxelCount()));
+    CPPUNIT_ASSERT_EQUAL(2, int(clipped.constTree().leafCount()));
+
+    typename GridT::ConstAccessor acc = clipped.getConstAccessor();
+    const ValueT bg = clipped.background();
+    Coord xyz;
+    int &x = xyz[0], &y = xyz[1], &z = xyz[2];
+    for (x = -10; x <= 10; ++x) {
+        for (y = -10; y <= 10; ++y) {
+            for (z = -10; z <= 10; ++z) {
+                if (x == 4 && y == 4 && z >= -6 && z <= 6) {
+                    CPPUNIT_ASSERT_EQUAL(fg, acc.getValue(Coord(4, 4, z)));
+                } else {
+                    CPPUNIT_ASSERT_EQUAL(bg, acc.getValue(Coord(x, y, z)));
+                }
+            }
+        }
+    }
+}
+
+
+// See also TestTools::testClipping()
+void
+TestGrid::testClipping()
+{
+    using namespace openvdb;
+
+    const BBoxd clipBox(Vec3d(4.0, 4.0, -6.0), Vec3d(4.9, 4.9, 6.0));
+
+    {
+        const float fg = 5.f;
+        FloatGrid cube(0.f);
+        cube.fill(CoordBBox(Coord(-10), Coord(10)), /*value=*/fg, /*active=*/true);
+#if OPENVDB_ABI_VERSION_NUMBER <= 2
+        cube.tree().clip(cube.constTransform().worldToIndexNodeCentered(clipBox));
+#else
+        cube.clipGrid(clipBox);
+#endif
+        validateClippedGrid(cube, fg);
+    }
+    {
+        const bool fg = true;
+        BoolGrid cube(false);
+        cube.fill(CoordBBox(Coord(-10), Coord(10)), /*value=*/fg, /*active=*/true);
+#if OPENVDB_ABI_VERSION_NUMBER <= 2
+        cube.tree().clip(cube.constTransform().worldToIndexNodeCentered(clipBox));
+#else
+        cube.clipGrid(clipBox);
+#endif
+        validateClippedGrid(cube, fg);
+    }
+    {
+        const Vec3s fg(1.f, -2.f, 3.f);
+        Vec3SGrid cube(Vec3s(0.f));
+        cube.fill(CoordBBox(Coord(-10), Coord(10)), /*value=*/fg, /*active=*/true);
+#if OPENVDB_ABI_VERSION_NUMBER <= 2
+        cube.tree().clip(cube.constTransform().worldToIndexNodeCentered(clipBox));
+#else
+        cube.clipGrid(clipBox);
+#endif
+        validateClippedGrid(cube, fg);
+    }
+    /*
+    {// Benchmark multi-threaded copy construction
+        openvdb::util::CpuTimer timer;
+        openvdb::initialize();
+        openvdb::io::File file("/usr/pic1/Data/OpenVDB/LevelSetModels/crawler.vdb");
+        file.open();
+        openvdb::GridBase::Ptr baseGrid = file.readGrid("ls_crawler");
+        file.close();
+        openvdb::FloatGrid::Ptr grid = openvdb::gridPtrCast<openvdb::FloatGrid>(baseGrid);
+        //grid->tree().print();
+        timer.start("\nCopy construction");
+        openvdb::FloatTree fTree(grid->tree());
+        timer.stop();
+
+        timer.start("\nBoolean topology copy construction");
+        openvdb::BoolTree bTree(grid->tree(), false, openvdb::TopologyCopy());
+        timer.stop();
+
+        timer.start("\nBoolean topology union");
+        bTree.topologyUnion(fTree);
+        timer.stop();
+        //bTree.print();
+    }
+    */
+}
+
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

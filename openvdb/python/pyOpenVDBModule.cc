@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -30,9 +30,23 @@
 
 #include <cstring> // for strncmp(), strrchr(), etc.
 #include <limits>
+#include <string>
+#include <utility> // for std::make_pair()
 #include <boost/python.hpp>
 #include <boost/python/stl_iterator.hpp>
 #include <boost/python/exception_translator.hpp>
+#ifndef DWA_BOOST_VERSION
+#include <boost/version.hpp>
+#define DWA_BOOST_VERSION (10 * BOOST_VERSION)
+#endif
+#if defined PY_OPENVDB_USE_NUMPY && DWA_BOOST_VERSION < 1065000
+  #define PY_ARRAY_UNIQUE_SYMBOL PY_OPENVDB_ARRAY_API
+  #include <numpyconfig.h>
+  #ifdef NPY_1_7_API_VERSION
+    #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+  #endif
+  #include <arrayobject.h> // for import_array()
+#endif
 #include "openvdb/openvdb.h"
 #include "pyopenvdb.h"
 #include "pyGrid.h"
@@ -68,13 +82,13 @@ struct CoordConverter
         return obj.ptr();
     }
 
-    /// @return NULL if the given Python object is not convertible to a Coord.
+    /// @return nullptr if the given Python object is not convertible to a Coord.
     static void* convertible(PyObject* obj)
     {
-        if (!PySequence_Check(obj)) return NULL; // not a Python sequence
+        if (!PySequence_Check(obj)) return nullptr; // not a Python sequence
 
         Py_ssize_t len = PySequence_Length(obj);
-        if (len != 3 && len != 1) return NULL; // not the right length
+        if (len != 3 && len != 1) return nullptr; // not the right length
 
         return obj;
     }
@@ -84,8 +98,7 @@ struct CoordConverter
         py::converter::rvalue_from_python_stage1_data* data)
     {
         // Construct a Coord in the provided memory location.
-        typedef py::converter::rvalue_from_python_storage<openvdb::Coord>
-            StorageT;
+        using StorageT = py::converter::rvalue_from_python_storage<openvdb::Coord>;
         void* storage = reinterpret_cast<StorageT*>(data)->storage.bytes;
         new (storage) openvdb::Coord; // placement new
         data->convertible = storage;
@@ -155,17 +168,17 @@ struct VecConverter
 
     static void* convertible(PyObject* obj)
     {
-        if (!PySequence_Check(obj)) return NULL; // not a Python sequence
+        if (!PySequence_Check(obj)) return nullptr; // not a Python sequence
 
         Py_ssize_t len = PySequence_Length(obj);
-        if (len != VecT::size) return NULL;
+        if (len != VecT::size) return nullptr;
 
         // Check that all elements of the Python sequence are convertible
         // to the Vec's value type.
         py::object seq = pyutil::pyBorrow(obj);
         for (int i = 0; i < VecT::size; ++i) {
             if (!py::extract<typename VecT::value_type>(seq[i]).check()) {
-                return NULL;
+                return nullptr;
             }
         }
         return obj;
@@ -175,7 +188,7 @@ struct VecConverter
         py::converter::rvalue_from_python_stage1_data* data)
     {
         // Construct a Vec in the provided memory location.
-        typedef py::converter::rvalue_from_python_storage<VecT> StorageT;
+        using StorageT = py::converter::rvalue_from_python_storage<VecT>;
         void* storage = reinterpret_cast<StorageT*>(data)->storage.bytes;
         new (storage) VecT; // placement new
         data->convertible = storage;
@@ -255,14 +268,14 @@ struct MetaMapConverter
 
     static void* convertible(PyObject* obj)
     {
-        return (PyMapping_Check(obj) ? obj : NULL);
+        return (PyMapping_Check(obj) ? obj : nullptr);
     }
 
     static void construct(PyObject* obj,
         py::converter::rvalue_from_python_stage1_data* data)
     {
         // Construct a MetaMap in the provided memory location.
-        typedef py::converter::rvalue_from_python_storage<MetaMap> StorageT;
+        using StorageT = py::converter::rvalue_from_python_storage<MetaMap>;
         void* storage = reinterpret_cast<StorageT*>(data)->storage.bytes;
         new (storage) MetaMap; // placement new
         data->convertible = storage;
@@ -293,13 +306,17 @@ struct MetaMapConverter
             if (py::extract<std::string>(val).check()) {
                 value.reset(
                     new StringMetadata(py::extract<std::string>(val)));
-            } else if (PyInt_Check(val.ptr())
-                && PyInt_AsLong(val.ptr()) <= std::numeric_limits<Int32>::max()
-                && PyInt_AsLong(val.ptr()) >= std::numeric_limits<Int32>::min())
-            {
-                value.reset(new Int32Metadata(py::extract<Int32>(val)));
-            } else if (PyInt_Check(val.ptr()) || PyLong_Check(val.ptr())) {
-                value.reset(new Int64Metadata(py::extract<Int64>(val)));
+            } else if (PyBool_Check(val.ptr())) {
+                value.reset(new BoolMetadata(py::extract<bool>(val)));
+            } else if (py::extract<Int64>(val).check()) {
+                const Int64 n = py::extract<Int64>(val);
+                if (n <= std::numeric_limits<Int32>::max()
+                    && n >= std::numeric_limits<Int32>::min())
+                {
+                    value.reset(new Int32Metadata(static_cast<Int32>(n)));
+                } else {
+                    value.reset(new Int64Metadata(n));
+                }
             //} else if (py::extract<float>(val).check()) {
             //    value.reset(new FloatMetadata(py::extract<float>(val)));
             } else if (py::extract<double>(val).check()) {
@@ -359,7 +376,7 @@ template<typename T> void translateException(const T&) {}
     {                                                               \
         const char* name = #_openvdbname;                           \
         if (const char* c = std::strrchr(name, ':')) name = c + 1;  \
-        const int namelen = std::strlen(name);                      \
+        const int namelen = int(std::strlen(name));                 \
         const char* msg = e.what();                                 \
         if (0 == std::strncmp(msg, name, namelen)) msg += namelen;  \
         if (0 == std::strncmp(msg, ": ", 2)) msg += 2;              \
@@ -386,6 +403,14 @@ PYOPENVDB_CATCH(openvdb::ValueError,            PyExc_ValueError)
 
 
 ////////////////////////////////////////
+
+
+py::object readFromFile(const std::string&, const std::string&);
+py::tuple readAllFromFile(const std::string&);
+py::dict readFileMetadata(const std::string&);
+py::object readGridMetadataFromFile(const std::string&, const std::string&);
+py::list readAllGridMetadataFromFile(const std::string&);
+void writeToFile(const std::string&, py::object, py::object);
 
 
 py::object
@@ -499,6 +524,68 @@ writeToFile(const std::string& filename, py::object gridOrSeqObj, py::object dic
 ////////////////////////////////////////
 
 
+std::string getLoggingLevel();
+void setLoggingLevel(py::object);
+void setProgramName(py::object, bool);
+
+
+std::string
+getLoggingLevel()
+{
+    switch (logging::getLevel()) {
+        case logging::Level::Debug: return "debug";
+        case logging::Level::Info:  return "info";
+        case logging::Level::Warn:  return "warn";
+        case logging::Level::Error: return "error";
+        case logging::Level::Fatal: break;
+    }
+    return "fatal";
+}
+
+
+void
+setLoggingLevel(py::object pyLevelObj)
+{
+    std::string levelStr;
+    if (!py::extract<py::str>(pyLevelObj).check()) {
+        levelStr = py::extract<std::string>(pyLevelObj.attr("__str__")());
+    } else {
+        const py::str pyLevelStr =
+            py::extract<py::str>(pyLevelObj.attr("lower")().attr("lstrip")("-"));
+        levelStr = py::extract<std::string>(pyLevelStr);
+        if (levelStr == "debug") { logging::setLevel(logging::Level::Debug); return; }
+        else if (levelStr == "info") { logging::setLevel(logging::Level::Info); return; }
+        else if (levelStr == "warn") { logging::setLevel(logging::Level::Warn); return; }
+        else if (levelStr == "error") { logging::setLevel(logging::Level::Error); return; }
+        else if (levelStr == "fatal") { logging::setLevel(logging::Level::Fatal); return; }
+    }
+    PyErr_Format(PyExc_ValueError,
+        "expected logging level \"debug\", \"info\", \"warn\", \"error\", or \"fatal\","
+        " got \"%s\"", levelStr.c_str());
+    py::throw_error_already_set();
+}
+
+
+void
+setProgramName(py::object nameObj, bool color)
+{
+    if (py::extract<std::string>(nameObj).check()) {
+        logging::setProgramName(py::extract<std::string>(nameObj), color);
+    } else {
+        const std::string
+            str = py::extract<std::string>(nameObj.attr("__str__")()),
+            typ = pyutil::className(nameObj).c_str();
+        PyErr_Format(PyExc_TypeError,
+            "expected string as program name, got \"%s\" of type %s",
+            str.c_str(), typ.c_str());
+        py::throw_error_already_set();
+    }
+}
+
+
+////////////////////////////////////////
+
+
 // Descriptor for the openvdb::GridClass enum (for use with pyutil::StringEnum)
 struct GridClassDescr
 {
@@ -517,7 +604,7 @@ struct GridClassDescr
             { "STAGGERED",  strdup(GridBase::gridClassToString(GRID_STAGGERED).c_str()) }
         };
         if (i >= 0 && i < sCount) return pyutil::CStringPair(&sStrings[i][0], &sStrings[i][1]);
-        return pyutil::CStringPair(static_cast<char**>(NULL), static_cast<char**>(NULL));
+        return pyutil::CStringPair(static_cast<char**>(nullptr), static_cast<char**>(nullptr));
     }
 };
 
@@ -530,21 +617,21 @@ struct VecTypeDescr
     {
         return
             "The type of a vector determines how transforms are applied to it.\n"
-            "- INVARIANT:\n"
-            "    does not transform (e.g., tuple, uvw, color)\n"
-            "- COVARIANT:\n"
-            "    apply inverse-transpose transformation with w = 0\n"
-            "    and ignore translation (e.g., gradient/normal)\n"
-            "- COVARIANT_NORMALIZE:\n"
-            "    apply inverse-transpose transformation with w = 0\n"
-            "    and ignore translation, vectors are renormalized\n"
-            "    (e.g., unit normal)\n"
-            "- CONTRAVARIANT_RELATIVE:\n"
-            "    apply \"regular\" transformation with w = 0 and ignore\n"
-            "    translation (e.g., displacement, velocity, acceleration)\n"
-            "- CONTRAVARIANT_ABSOLUTE:\n"
-            "    apply \"regular\" transformation with w = 1 so that\n"
-            "    vector translates (e.g., position)";
+            "  - INVARIANT:\n"
+            "      does not transform (e.g., tuple, uvw, color)\n"
+            "  - COVARIANT:\n"
+            "      apply inverse-transpose transformation with w = 0\n"
+            "      and ignore translation (e.g., gradient/normal)\n"
+            "  - COVARIANT_NORMALIZE:\n"
+            "      apply inverse-transpose transformation with w = 0\n"
+            "      and ignore translation, vectors are renormalized\n"
+            "      (e.g., unit normal)\n"
+            "  - CONTRAVARIANT_RELATIVE:\n"
+            "      apply \"regular\" transformation with w = 0 and ignore\n"
+            "      translation (e.g., displacement, velocity, acceleration)\n"
+            "  - CONTRAVARIANT_ABSOLUTE:\n"
+            "      apply \"regular\" transformation with w = 1 so that\n"
+            "      vector translates (e.g., position)\n";
     }
     static pyutil::CStringPair item(int i)
     {
@@ -560,7 +647,7 @@ struct VecTypeDescr
                 strdup(GridBase::vecTypeToString(openvdb::VEC_CONTRAVARIANT_ABSOLUTE).c_str()) }
         };
         if (i >= 0 && i < sCount) return std::make_pair(&sStrings[i][0], &sStrings[i][1]);
-        return pyutil::CStringPair(static_cast<char**>(NULL), static_cast<char**>(NULL));
+        return pyutil::CStringPair(static_cast<char**>(nullptr), static_cast<char**>(nullptr));
     }
 };
 
@@ -572,8 +659,10 @@ struct VecTypeDescr
 
 #ifdef DWA_OPENVDB
 #define PY_OPENVDB_MODULE_NAME  _openvdb
+extern "C" { void init_openvdb(); }
 #else
 #define PY_OPENVDB_MODULE_NAME  pyopenvdb
+extern "C" { void initpyopenvdb(); }
 #endif
 
 BOOST_PYTHON_MODULE(PY_OPENVDB_MODULE_NAME)
@@ -582,6 +671,19 @@ BOOST_PYTHON_MODULE(PY_OPENVDB_MODULE_NAME)
     py::docstring_options docOptions;
     docOptions.disable_signatures();
     docOptions.enable_user_defined();
+
+#ifdef PY_OPENVDB_USE_NUMPY
+    // Initialize NumPy.
+#ifdef PY_OPENVDB_USE_BOOST_PYTHON_NUMPY
+    boost::python::numpy::initialize();
+#else
+#if PY_MAJOR_VERSION >= 3
+    if (_import_array()) {}
+#else
+    import_array();
+#endif
+#endif
+#endif
 
     using namespace openvdb::OPENVDB_VERSION_NAME;
 
@@ -673,6 +775,22 @@ BOOST_PYTHON_MODULE(PY_OPENVDB_MODULE_NAME)
         "Write a grid or a sequence of grids and, optionally, a dict\n"
         "of (name, value) metadata pairs to a .vdb file.");
 
+    py::def("getLoggingLevel", &_openvdbmodule::getLoggingLevel,
+        "getLoggingLevel() -> str\n\n"
+        "Return the severity threshold (\"debug\", \"info\", \"warn\", \"error\",\n"
+        "or \"fatal\") for error messages.");
+    py::def("setLoggingLevel", &_openvdbmodule::setLoggingLevel,
+        (py::arg("level")),
+        "setLoggingLevel(level)\n\n"
+        "Specify the severity threshold (\"debug\", \"info\", \"warn\", \"error\",\n"
+        "or \"fatal\") for error messages.  Messages of lower severity\n"
+        "will be suppressed.");
+    py::def("setProgramName", &_openvdbmodule::setProgramName,
+        (py::arg("name"), py::arg("color") = true),
+        "setProgramName(name, color=True)\n\n"
+        "Specify the program name to be displayed in error messages,\n"
+        "and optionally specify whether to print error messages in color.");
+
     // Add some useful module-level constants.
     py::scope().attr("LIBRARY_VERSION") = py::make_tuple(
         openvdb::OPENVDB_LIBRARY_MAJOR_VERSION,
@@ -688,6 +806,6 @@ BOOST_PYTHON_MODULE(PY_OPENVDB_MODULE_NAME)
 
 } // BOOST_PYTHON_MODULE
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

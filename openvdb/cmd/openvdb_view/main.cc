@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -29,25 +29,28 @@
 ///////////////////////////////////////////////////////////////////////////
 
 #include <openvdb_viewer/Viewer.h>
+#include <boost/algorithm/string/classification.hpp> // for boost::is_any_of()
+#include <boost/algorithm/string/predicate.hpp> // for boost::starts_with()
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <exception>
-#ifdef DWA_OPENVDB
-#include <logging_base/logging.h>
-#include <usagetrack.h>
-#endif
 
 
-void
-usage(const char* progName, int status)
+inline void
+usage [[noreturn]] (const char* progName, int status)
 {
     (status == EXIT_SUCCESS ? std::cout : std::cerr) <<
 "Usage: " << progName << " file.vdb [file.vdb ...] [options]\n" <<
 "Which: displays OpenVDB grids\n" <<
 "Options:\n" <<
-"    -i            print grid info\n" <<
-"    -d            print debugging info\n" <<
+"    -i                 print grid information\n" <<
+"    -h, -help          print this usage message and exit\n" <<
+"    -version           print version information\n" <<
+"\n" <<
 "Controls:\n" <<
 "    Esc                exit\n" <<
 "    -> (Right)         show next grid\n" <<
@@ -81,11 +84,6 @@ usage(const char* progName, int status)
 int
 main(int argc, char *argv[])
 {
-#ifdef DWA_OPENVDB
-    USAGETRACK_report_basic_tool_usage(argc, argv, /*duration=*/0);
-    logging_base::configure(argc, argv);
-#endif
-
     const char* progName = argv[0];
     if (const char* ptr = ::strrchr(progName, '/')) progName = ptr + 1;
 
@@ -93,8 +91,9 @@ main(int argc, char *argv[])
 
     try {
         openvdb::initialize();
+        openvdb::logging::initialize(argc, argv);
 
-        bool printInfo = false, printDebugInfo = false;
+        bool printInfo = false, printGLInfo = false, printVersionInfo = false;
 
         // Parse the command line.
         std::vector<std::string> filenames;
@@ -104,19 +103,55 @@ main(int argc, char *argv[])
                 filenames.push_back(str);
             } else if (str == "-i") {
                 printInfo = true;
-            } else if (str == "-d") {
-                printDebugInfo = true;
-            } else if (str == "-h" || str == "--help") {
+            } else if (str == "-d") { // deprecated
+                printGLInfo = true;
+            } else if (str == "-h" || str == "-help" || str == "--help") {
                 usage(progName, EXIT_SUCCESS);
+            } else if (str == "-version" || str == "--version") {
+                printVersionInfo = true;
+                printGLInfo = true;
             } else {
                 usage(progName, EXIT_FAILURE);
             }
         }
 
-        openvdb_viewer::Viewer viewer = openvdb_viewer::init(progName, printDebugInfo);
-
         const size_t numFiles = filenames.size();
-        if (numFiles == 0) usage(progName, EXIT_FAILURE);
+
+        if (printVersionInfo) {
+            std::cout << "OpenVDB library version: "
+                << openvdb::getLibraryVersionString() << "\n";
+            std::cout << "OpenVDB file format version: "
+                << openvdb::OPENVDB_FILE_VERSION << std::endl;
+            // If there are no files to view, don't print the OpenGL version,
+            // since that would require opening a viewer window.
+            if (numFiles == 0) return EXIT_SUCCESS;
+        }
+        if (numFiles == 0 && !printGLInfo) usage(progName, EXIT_FAILURE);
+
+        openvdb_viewer::Viewer viewer = openvdb_viewer::init(progName, /*bg=*/false);
+
+        if (printGLInfo) {
+            // Now that the viewer window is open, we can get the OpenGL version, if requested.
+            if (!printVersionInfo) {
+                // Preserve the behavior of the deprecated -d option.
+                std::cout << viewer.getVersionString() << std::endl;
+            } else {
+                // Print OpenGL and GLFW versions.
+                std::ostringstream ostr;
+                ostr << viewer.getVersionString(); // returns comma-separated list of versions
+                const std::string s = ostr.str();
+                std::vector<std::string> elems;
+                boost::split(elems, s, boost::algorithm::is_any_of(","));
+                for (size_t i = 0; i < elems.size(); ++i) {
+                    boost::trim(elems[i]);
+                    // Don't print the OpenVDB library version again.
+                    if (!boost::starts_with(elems[i], "OpenVDB:")) {
+                        std::cout << elems[i] << std::endl;
+                    }
+                }
+            }
+            if (numFiles == 0) return EXIT_SUCCESS;
+        }
 
         openvdb::GridCPtrVec allGrids;
 
@@ -145,18 +180,21 @@ main(int argc, char *argv[])
             }
         }
 
+        viewer.open();
         viewer.view(allGrids);
 
+        openvdb_viewer::exit();
+
     } catch (const char* s) {
-        OPENVDB_LOG_ERROR(progName << ": " << s);
+        OPENVDB_LOG_ERROR(s);
         status = EXIT_FAILURE;
     } catch (std::exception& e) {
-        OPENVDB_LOG_ERROR(progName << ": " << e.what());
+        OPENVDB_LOG_ERROR(e.what());
         status = EXIT_FAILURE;
     }
     return status;
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

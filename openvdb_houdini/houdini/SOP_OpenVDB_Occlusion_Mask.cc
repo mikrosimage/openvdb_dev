@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -32,7 +32,7 @@
 ///
 /// @author FX R&D OpenVDB team
 ///
-/// @brief Masks the occluded regions behind objects in the camera frustum 
+/// @brief Masks the occluded regions behind objects in the camera frustum
 
 #include <houdini_utils/ParmFactory.h>
 #include <openvdb_houdini/Utils.h>
@@ -44,6 +44,16 @@
 #include <openvdb/tools/Morphology.h>
 
 #include <OBJ/OBJ_Camera.h>
+#include <UT/UT_Version.h>
+
+#include <cmath> // for std::floor()
+#include <stdexcept>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
@@ -52,67 +62,31 @@ namespace hutil = houdini_utils;
 class SOP_OpenVDB_Occlusion_Mask: public hvdb::SOP_NodeVDB
 {
 public:
-    SOP_OpenVDB_Occlusion_Mask(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Occlusion_Mask() {};
+    SOP_OpenVDB_Occlusion_Mask(OP_Network* net, const char* name, OP_Operator* op):
+        hvdb::SOP_NodeVDB(net, name, op) {}
+    ~SOP_OpenVDB_Occlusion_Mask() override = default;
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions
+    {
+#endif
+    public:
+        openvdb::math::Transform::Ptr frustum() const { return mFrustum; }
+    protected:
+        OP_ERROR cookVDBSop(OP_Context&) override;
+    private:
+        openvdb::math::Transform::Ptr mFrustum;
+#if VDB_COMPILABLE_SOP
+    }; // class Cache
+#endif
+
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
+    void resolveObsoleteParms(PRM_ParmList*) override;
 
-    virtual OP_ERROR cookMyGuide1(OP_Context&);
-
-private:
-    openvdb::math::Transform::Ptr mFrustum;
-};
-
-
-
-////////////////////////////////////////
-
-
-void
-newSopOperator(OP_OperatorTable* table)
-{
-    if (table == NULL) return;
-
-    hutil::ParmList parms;
-
-    parms.add(hutil::ParmFactory(PRM_STRING, "group", "Grids")
-        .setHelpText("Specify a subset of the input VDB grids to be clip.")
-        .setChoiceList(&hutil::PrimGroupMenu));
-
-    parms.add(hutil::ParmFactory(PRM_STRING, "camera", "Camera")
-        .setHelpText("Reference camera path")
-        .setTypeExtended(PRM_TYPE_DYNAMIC_PATH)
-        .setSpareData(&PRM_SpareData::objCameraPath));
-
-    parms.add(hutil::ParmFactory(PRM_INT_J, "voxelCount", "Voxel count")
-        .setDefault(PRM100Defaults)
-        .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 200)
-        .setHelpText("Horizontal voxel count for the near plane."));
-
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelDepthSize", "Voxel depth size")
-        .setDefault(PRMoneDefaults)
-        .setRange(PRM_RANGE_RESTRICTED, 1e-5, PRM_RANGE_UI, 5)
-        .setHelpText("The voxel depth (uniform z-size) in world units."));
-
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "depth", "Mask Depth")
-        .setDefault(100)
-        .setRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 1000.0)
-        .setHelpText("Specify mask depth"));
-
-    parms.add(hutil::ParmFactory(PRM_INT_J, "erode", "Erode")
-        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 10)
-        .setDefault(PRMzeroDefaults));
-
-    parms.add(hutil::ParmFactory(PRM_INT_J, "zoffset", "Z Offset")
-        .setRange(PRM_RANGE_UI, -10, PRM_RANGE_UI, 10)
-        .setDefault(PRMzeroDefaults));
-
-    hvdb::OpenVDBOpFactory("OpenVDB Occlusion Mask", SOP_OpenVDB_Occlusion_Mask::factory, parms, *table)
-        .addInput("VDBs");
-}
+    OP_ERROR cookMyGuide1(OP_Context&) override;
+}; // class SOP_OpenVDB_Occlusion_Mask
 
 
 ////////////////////////////////////////
@@ -126,20 +100,125 @@ SOP_OpenVDB_Occlusion_Mask::factory(OP_Network* net,
 }
 
 
-SOP_OpenVDB_Occlusion_Mask::SOP_OpenVDB_Occlusion_Mask(OP_Network* net,
-    const char* name, OP_Operator* op):
-    hvdb::SOP_NodeVDB(net, name, op)
-    , mFrustum()
+void
+newSopOperator(OP_OperatorTable* table)
 {
+    if (table == nullptr) return;
+
+    hutil::ParmList parms;
+
+    parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Specify a subset of the input VDB grids to be processed.")
+        .setDocumentation(
+            "A subset of the input VDBs to be processed"
+            " (see [specifying volumes|/model/volumes#group])"));
+
+    parms.add(hutil::ParmFactory(PRM_STRING, "camera", "Camera")
+        .setTypeExtended(PRM_TYPE_DYNAMIC_PATH)
+        .setSpareData(&PRM_SpareData::objCameraPath)
+        .setTooltip("Reference camera path")
+        .setDocumentation("The path to the camera (e.g., `/obj/cam1`)"));
+
+    parms.add(hutil::ParmFactory(PRM_INT_J, "voxelcount", "Voxel Count")
+        .setDefault(PRM100Defaults)
+        .setRange(PRM_RANGE_RESTRICTED, 1, PRM_RANGE_UI, 200)
+        .setTooltip("The desired width in voxels of the camera's near plane"));
+
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxeldepthsize", "Voxel Depth Size")
+        .setDefault(PRMoneDefaults)
+        .setRange(PRM_RANGE_RESTRICTED, 1e-5, PRM_RANGE_UI, 5)
+        .setTooltip("The depth of a voxel in world units (all voxels have equal depth)"));
+
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "depth", "Mask Depth")
+        .setDefault(100)
+        .setRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 1000.0)
+        .setTooltip(
+            "The desired depth of the mask in world units"
+            " from the near plane to the far plane"));
+
+    parms.add(hutil::ParmFactory(PRM_INT_J, "erode", "Erode")
+        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 10)
+        .setDefault(PRMzeroDefaults)
+        .setTooltip("The number of voxels by which to shrink the mask"));
+
+    parms.add(hutil::ParmFactory(PRM_INT_J, "zoffset", "Z Offset")
+        .setRange(PRM_RANGE_UI, -10, PRM_RANGE_UI, 10)
+        .setDefault(PRMzeroDefaults)
+        .setTooltip("The number of voxels by which to offset the near plane"));
+
+
+    hutil::ParmList obsoleteParms;
+    obsoleteParms.add(hutil::ParmFactory(PRM_INT_J, "voxelCount", "Voxel Count")
+        .setDefault(PRM100Defaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "voxelDepthSize", "Voxel Depth Size")
+        .setDefault(PRMoneDefaults));
+
+
+    hvdb::OpenVDBOpFactory("OpenVDB Occlusion Mask",
+        SOP_OpenVDB_Occlusion_Mask::factory, parms, *table)
+        .addInput("VDBs")
+        .setObsoleteParms(obsoleteParms)
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Occlusion_Mask::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Identify voxels of a VDB volume that are in shadow from a given camera.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node outputs a VDB volume whose active voxels denote the voxels\n\
+of an input volume inside a camera frustum that would be occluded\n\
+when viewed through the camera.\n\
+\n\
+@related\n\
+- [OpenVDB Clip|Node:sop/DW_OpenVDBClip]\n\
+- [OpenVDB Create|Node:sop/DW_OpenVDBCreate]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
+
+void
+SOP_OpenVDB_Occlusion_Mask::resolveObsoleteParms(PRM_ParmList* obsoleteParms)
+{
+    if (!obsoleteParms) return;
+
+    resolveRenamedParm(*obsoleteParms, "voxelCount", "voxelcount");
+    resolveRenamedParm(*obsoleteParms, "voxelDepthSize", "voxeldepthsize");
+
+    // Delegate to the base class.
+    hvdb::SOP_NodeVDB::resolveObsoleteParms(obsoleteParms);
+}
+
+
+////////////////////////////////////////
+
+
 OP_ERROR
-SOP_OpenVDB_Occlusion_Mask::cookMyGuide1(OP_Context& context)
+SOP_OpenVDB_Occlusion_Mask::cookMyGuide1(OP_Context&)
 {
     myGuide1->clearAndDestroy();
-    if (mFrustum) {
-        UT_Vector3 color(0.9, 0.0, 0.0);
-        hvdb::drawFrustum(*myGuide1, *mFrustum, &color, NULL, false, false);
+
+    openvdb::math::Transform::ConstPtr frustum;
+#if !VDB_COMPILABLE_SOP
+    frustum = mFrustum;
+#else
+    // Attempt to extract the frustum from our cache.
+    if (auto* cache = dynamic_cast<SOP_OpenVDB_Occlusion_Mask::Cache*>(myNodeVerbCache)) {
+        frustum = cache->frustum();
+    }
+#endif
+
+    if (frustum) {
+        UT_Vector3 color(0.9f, 0.0f, 0.0f);
+        hvdb::drawFrustum(*myGuide1, *frustum, &color, nullptr, false, false);
     }
     return error();
 }
@@ -155,7 +234,7 @@ template<typename BoolTreeT>
 class VoxelShadow
 {
 public:
-    typedef openvdb::tree::LeafManager<const BoolTreeT> BoolLeafManagerT;
+    using BoolLeafManagerT = openvdb::tree::LeafManager<const BoolTreeT>;
 
     //////////
 
@@ -266,8 +345,7 @@ struct ConstructShadow
     template<typename GridType>
     void operator()(const GridType& grid)
     {
-        typedef typename GridType::TreeType TreeType;
-        typedef openvdb::BoolTree BoolTree;
+        using TreeType = typename GridType::TreeType;
 
         const TreeType& tree = grid.tree();
 
@@ -283,7 +361,7 @@ struct ConstructShadow
             if (openvdb::GRID_LEVEL_SET == grid.getGridClass()) {
 
                 openvdb::BoolGrid::Ptr tmpGrid = openvdb::tools::sdfInteriorMask(grid);
-                
+
                 topologyMask.tree().merge(tmpGrid->tree());
 
                 if (mErode > 3) {
@@ -300,7 +378,8 @@ struct ConstructShadow
 
 
             if (grid.transform().voxelSize()[0] < mFrustum.voxelSize()[0]) {
-                openvdb::tools::resampleToMatch<openvdb::tools::PointSampler>(topologyMask, frustumMask);
+                openvdb::tools::resampleToMatch<openvdb::tools::PointSampler>(
+                    topologyMask, frustumMask);
             } else {
                 openvdb::tools::resampleToMatch<BoolSampler>(topologyMask, frustumMask);
             }
@@ -357,15 +436,16 @@ private:
 
 
 OP_ERROR
-SOP_OpenVDB_Occlusion_Mask::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Occlusion_Mask)::cookVDBSop(OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
-        const fpreal time = context.getTime();
-
         // This does a shallow copy of VDB-grids and deep copy of native Houdini primitives.
         duplicateSource(0, context);
+#endif
 
+        const fpreal time = context.getTime();
 
         // Camera reference
         mFrustum.reset();
@@ -375,8 +455,14 @@ SOP_OpenVDB_Occlusion_Mask::cookMySop(OP_Context& context)
         cameraPath.harden();
 
         if (cameraPath.isstring()) {
+#if VDB_COMPILABLE_SOP
+            OBJ_Node* camobj = cookparms()->getCwd()->findOBJNode(cameraPath);
+            OP_Node* self = cookparms()->getCwd();
+#else
+            OBJ_Node* camobj = findOBJNode(cameraPath);
+            OP_Node* self = this;
+#endif
 
-            OBJ_Node *camobj = findOBJNode(cameraPath);
             if (!camobj) {
                 addError(SOP_MESSAGE, "Camera not found");
                 return error();
@@ -391,24 +477,26 @@ SOP_OpenVDB_Occlusion_Mask::cookMySop(OP_Context& context)
             // Register
             this->addExtraInput(cam, OP_INTEREST_DATA);
 
-            const float nearPlane = cam->getNEAR(time);
-            const float farPlane = nearPlane +  evalFloat("depth", 0, time);
-            const float voxelDepthSize = evalFloat("voxelDepthSize", 0, time);
-            const int voxelCount = evalInt("voxelCount", 0, time);
+            const float nearPlane = static_cast<float>(cam->getNEAR(time));
+            const float farPlane = static_cast<float>(nearPlane + evalFloat("depth", 0, time));
+            const float voxelDepthSize = static_cast<float>(evalFloat("voxeldepthsize", 0, time));
+            const int voxelCount = static_cast<int>(evalInt("voxelcount", 0, time));
 
-
-            mFrustum = hvdb::frustumTransformFromCamera(*this, context, *cam,
+            mFrustum = hvdb::frustumTransformFromCamera(*self, context, *cam,
                 0, nearPlane, farPlane, voxelDepthSize, voxelCount);
+        } else {
+            addError(SOP_MESSAGE, "No camera referenced.");
+            return error();
         }
 
 
-        ConstructShadow shadowOp(*mFrustum, evalInt("erode", 0, time), evalInt("zoffset", 0, time));
+        ConstructShadow shadowOp(*mFrustum,
+            static_cast<int>(evalInt("erode", 0, time)),
+            static_cast<int>(evalInt("zoffset", 0, time)));
 
 
         // Get the group of grids to surface.
-        UT_String groupStr;
-        evalString(groupStr, "group", 0, time);
-        const GA_PrimitiveGroup* group = matchGroup(*gdp, groupStr.toStdString());
+        const GA_PrimitiveGroup* group = matchGroup(*gdp, evalStdString("group", time));
 
         for (hvdb::VdbPrimIterator it(gdp, group); it; ++it) {
 
@@ -417,10 +505,13 @@ SOP_OpenVDB_Occlusion_Mask::cookMySop(OP_Context& context)
 
             // Replace the original VDB primitive with a new primitive that contains
             // the output grid and has the same attributes and group membership.
-            hvdb::replaceVdbPrimitive(*gdp, shadowOp.grid(), **it, true);
+            if (GU_PrimVDB* prim = hvdb::replaceVdbPrimitive(*gdp, shadowOp.grid(), **it, true)) {
+                // Visualize our bool grids as "smoke", not whatever the input
+                // grid was, which can be a levelset.
+                prim->setVisualization(GEO_VOLUMEVIS_SMOKE, prim->getVisIso(),
+                    prim->getVisDensity());
+            }
         }
-
-
 
     } catch (std::exception& e) {
         addError(SOP_MESSAGE, e.what());
@@ -429,6 +520,6 @@ SOP_OpenVDB_Occlusion_Mask::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

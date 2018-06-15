@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -49,6 +49,13 @@ inline double voxelVolume1(math::Transform& t, const Vec3d& p) { return t.voxelV
 inline Vec3d indexToWorld(math::Transform& t, const Vec3d& p) { return t.indexToWorld(p); }
 inline Vec3d worldToIndex(math::Transform& t, const Vec3d& p) { return t.worldToIndex(p); }
 
+inline Coord worldToIndexCellCentered(math::Transform& t, const Vec3d& p) {
+    return t.worldToIndexCellCentered(p);
+}
+inline Coord worldToIndexNodeCentered(math::Transform& t, const Vec3d& p) {
+    return t.worldToIndexNodeCentered(p);
+}
+
 
 inline std::string
 info(math::Transform& t)
@@ -74,12 +81,12 @@ createLinearFromMat(py::object obj)
     // Verify that obj is a four-element sequence.
     bool is4x4Seq = (PySequence_Check(obj.ptr()) && PySequence_Length(obj.ptr()) == 4);
     if (is4x4Seq) {
-        for (size_t row = 0; is4x4Seq && row < 4; ++row) {
+        for (int row = 0; is4x4Seq && row < 4; ++row) {
             // Verify that each element of obj is itself a four-element sequence.
             py::object rowObj = obj[row];
             if (PySequence_Check(rowObj.ptr()) && PySequence_Length(rowObj.ptr()) == 4) {
                 // Extract four numeric values from this row of the sequence.
-                for (size_t col = 0; is4x4Seq && col < 4; ++col) {
+                for (int col = 0; is4x4Seq && col < 4; ++col) {
                     if (py::extract<double>(rowObj[col]).check()) {
                         m[row][col] = py::extract<double>(rowObj[col]);
                     } else {
@@ -112,7 +119,7 @@ createFrustum(const Coord& xyzMin, const Coord& xyzMax,
 ////////////////////////////////////////
 
 
-struct PickleSuite: py::pickle_suite
+struct PickleSuite: public py::pickle_suite
 {
     enum { STATE_DICT = 0, STATE_MAJOR, STATE_MINOR, STATE_FORMAT, STATE_XFORM };
 
@@ -134,12 +141,19 @@ struct PickleSuite: py::pickle_suite
             // Construct a state tuple comprising the Python object's __dict__,
             // the version numbers of the serialization format,
             // and the serialized Transform.
+#if PY_MAJOR_VERSION >= 3
+            // Convert the byte string to a "bytes" sequence.
+            const std::string s = ostr.str();
+            py::object bytesObj = pyutil::pyBorrow(PyBytes_FromStringAndSize(s.data(), s.size()));
+#else
+            py::str bytesObj(ostr.str());
+#endif
             state = py::make_tuple(
                 xformObj.attr("__dict__"),
                 uint32_t(OPENVDB_LIBRARY_MAJOR_VERSION),
                 uint32_t(OPENVDB_LIBRARY_MINOR_VERSION),
                 uint32_t(OPENVDB_FILE_VERSION),
-                ostr.str());
+                bytesObj);
         }
         return state;
     }
@@ -147,9 +161,9 @@ struct PickleSuite: py::pickle_suite
     /// Restore the given Transform to a saved state.
     static void setstate(py::object xformObj, py::object stateObj)
     {
-        math::Transform::Ptr xform;
+        math::Transform* xform = nullptr;
         {
-            py::extract<math::Transform::Ptr> x(xformObj);
+            py::extract<math::Transform*> x(xformObj);
             if (x.check()) xform = x();
             else return;
         }
@@ -190,15 +204,35 @@ struct PickleSuite: py::pickle_suite
 
         std::string serialized;
         if (!badState) {
-            // Extract the string containing the serialized Transform.
-            py::extract<std::string> x(state[int(STATE_XFORM)]);
+            // Extract the sequence containing the serialized Transform.
+            py::object bytesObj = state[int(STATE_XFORM)];
+#if PY_MAJOR_VERSION >= 3
+            badState = true;
+            if (PyBytes_Check(bytesObj.ptr())) {
+                // Convert the "bytes" sequence to a byte string.
+                char* buf = NULL;
+                Py_ssize_t length = 0;
+                if (-1 != PyBytes_AsStringAndSize(bytesObj.ptr(), &buf, &length)) {
+                    if (buf != NULL && length > 0) {
+                        serialized.assign(buf, buf + length);
+                        badState = false;
+                    }
+                }
+            }
+#else
+            py::extract<std::string> x(bytesObj);
             if (x.check()) serialized = x();
             else badState = true;
+#endif
         }
 
         if (badState) {
             PyErr_SetObject(PyExc_ValueError,
+#if PY_MAJOR_VERSION >= 3
+                ("expected (dict, int, int, int, bytes) tuple in call to __setstate__; found %s"
+#else
                 ("expected (dict, int, int, int, str) tuple in call to __setstate__; found %s"
+#endif
                      % stateObj.attr("__repr__")()).ptr());
             py::throw_error_already_set();
         }
@@ -212,6 +246,8 @@ struct PickleSuite: py::pickle_suite
 
 } // namespace pyTransform
 
+
+void exportTransform();
 
 void
 exportTransform()
@@ -278,12 +314,12 @@ exportTransform()
         .def("worldToIndex", &pyTransform::worldToIndex, py::arg("xyz"),
             "worldToIndex((x, y, z)) -> (x', y', z')\n\n"
             "Apply the inverse of this transformation to the given coordinates.")
-        .def("worldToIndexCellCentered", &math::Transform::worldToIndexCellCentered,
+        .def("worldToIndexCellCentered", &pyTransform::worldToIndexCellCentered,
             py::arg("xyz"),
             "worldToIndexCellCentered((x, y, z)) -> (i, j, k)\n\n"
             "Apply the inverse of this transformation to the given coordinates\n"
             "and round the result to the nearest integer coordinates.")
-        .def("worldToIndexNodeCentered", &math::Transform::worldToIndexNodeCentered,
+        .def("worldToIndexNodeCentered", &pyTransform::worldToIndexNodeCentered,
             py::arg("xyz"),
             "worldToIndexNodeCentered((x, y, z)) -> (i, j, k)\n\n"
             "Apply the inverse of this transformation to the given coordinates\n"
@@ -316,6 +352,6 @@ exportTransform()
     py::register_ptr_to_python<math::Transform::Ptr>();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

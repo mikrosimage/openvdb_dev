@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -32,25 +32,34 @@
 #include <openvdb/Types.h>
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/Composite.h>
+#include <openvdb/tools/LevelSetSphere.h>
+#include <openvdb/util/CpuTimer.h>
 #include "util.h" // for unittest_util::makeSphere()
+#include <algorithm> // for std::max() and std::min()
+#include <cmath> // for std::isnan() and std::isinf()
+#include <limits> // for std::numeric_limits
+#include <sstream>
+#include <string>
+#include <type_traits>
 
 #define TEST_CSG_VERBOSE 0
 
 #if TEST_CSG_VERBOSE
-#include <tbb/tick_count.h> // Timer
+#include <openvdb/util/CpuTimer.h>
+#include <iostream>
 #endif
 
 namespace {
-typedef openvdb::tree::Tree4<float, 4, 3, 3>::Type Float433Tree;
-typedef openvdb::Grid<Float433Tree> Float433Grid;
+using Float433Tree = openvdb::tree::Tree4<float, 4, 3, 3>::Type;
+using Float433Grid = openvdb::Grid<Float433Tree>;
 }
 
 
 class TestTreeCombine: public CppUnit::TestFixture
 {
 public:
-    virtual void setUp() { openvdb::initialize(); Float433Grid::registerGrid(); }
-    virtual void tearDown() { openvdb::uninitialize(); }
+     void setUp() override { openvdb::initialize(); Float433Grid::registerGrid(); }
+     void tearDown() override { openvdb::uninitialize(); }
 
     CPPUNIT_TEST_SUITE(TestTreeCombine);
     CPPUNIT_TEST(testCombine);
@@ -60,11 +69,14 @@ public:
     CPPUNIT_TEST(testCompSum);
     CPPUNIT_TEST(testCompProd);
     CPPUNIT_TEST(testCompDiv);
+    CPPUNIT_TEST(testCompDivByZero);
     CPPUNIT_TEST(testCompReplace);
     CPPUNIT_TEST(testBoolTree);
 #ifdef DWA_OPENVDB
     CPPUNIT_TEST(testCsg);
 #endif
+    CPPUNIT_TEST(testCsgCopy);
+    CPPUNIT_TEST(testCompActiveLeafVoxels);
     CPPUNIT_TEST_SUITE_END();
 
     void testCombine();
@@ -74,9 +86,12 @@ public:
     void testCompSum();
     void testCompProd();
     void testCompDiv();
+    void testCompDivByZero();
     void testCompReplace();
     void testBoolTree();
     void testCsg();
+    void testCsgCopy();
+    void testCompActiveLeafVoxels();
 
 private:
     template<class TreeT, typename TreeComp, typename ValueComp>
@@ -88,15 +103,6 @@ private:
     template<typename TreeT, typename VisitorT>
     typename TreeT::Ptr
     visitCsg(const TreeT& a, const TreeT& b, const TreeT& ref, const VisitorT&);
-
-#if TEST_CSG_VERBOSE
-    struct Timer {
-        tbb::tick_count t;
-        Timer(): t(tbb::tick_count::now()) {}
-        void start() { t = tbb::tick_count::now(); }
-        double stop() { return (tbb::tick_count::now() - t).seconds(); };
-    };
-#endif
 };
 
 
@@ -131,7 +137,7 @@ void combine(TreeT& a, TreeT& b)
 template<typename TreeT>
 void extendedCombine(TreeT& a, TreeT& b)
 {
-    typedef typename TreeT::ValueType ValueT;
+    using ValueT = typename TreeT::ValueType;
     struct ArgsOp {
         static void order(openvdb::CombineArgs<ValueT>& args) {
             // The result is order-dependent on A and B.
@@ -148,25 +154,25 @@ template<typename TreeT> void compSum(TreeT& a, TreeT& b) { openvdb::tools::comp
 template<typename TreeT> void compMul(TreeT& a, TreeT& b) { openvdb::tools::compMul(a, b); }\
 template<typename TreeT> void compDiv(TreeT& a, TreeT& b) { openvdb::tools::compDiv(a, b); }\
 
-float orderf(float a, float b) { return a + 100 * b; }
-float maxf(float a, float b) { return std::max(a, b); }
-float minf(float a, float b) { return std::min(a, b); }
-float sumf(float a, float b) { return a + b; }
-float mulf(float a, float b) { return a * b; }
-float divf(float a, float b) { return a / b; }
+inline float orderf(float a, float b) { return a + 100 * b; }
+inline float maxf(float a, float b) { return std::max(a, b); }
+inline float minf(float a, float b) { return std::min(a, b); }
+inline float sumf(float a, float b) { return a + b; }
+inline float mulf(float a, float b) { return a * b; }
+inline float divf(float a, float b) { return a / b; }
 
-openvdb::Vec3f orderv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a + 100 * b; }
-openvdb::Vec3f maxv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) {
+inline openvdb::Vec3f orderv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a+100*b; }
+inline openvdb::Vec3f maxv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) {
     const float aMag = a.lengthSqr(), bMag = b.lengthSqr();
     return (aMag > bMag ? a : (bMag > aMag ? b : std::max(a, b)));
 }
-openvdb::Vec3f minv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) {
+inline openvdb::Vec3f minv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) {
     const float aMag = a.lengthSqr(), bMag = b.lengthSqr();
     return (aMag < bMag ? a : (bMag < aMag ? b : std::min(a, b)));
 }
-openvdb::Vec3f sumv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a + b; }
-openvdb::Vec3f mulv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a * b; }
-openvdb::Vec3f divv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a / b; }
+inline openvdb::Vec3f sumv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a + b; }
+inline openvdb::Vec3f mulv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a * b; }
+inline openvdb::Vec3f divv(const openvdb::Vec3f& a, const openvdb::Vec3f& b) { return a / b; }
 
 } // namespace Local
 } // unnamed namespace
@@ -224,6 +230,73 @@ TestTreeCombine::testCompDiv()
 
 
 void
+TestTreeCombine::testCompDivByZero()
+{
+    const openvdb::Coord c0(0), c1(1), c2(2), c3(3), c4(4);
+
+    // Verify that integer-valued grids behave well w.r.t. division by zero.
+    {
+        const openvdb::Int32 inf = std::numeric_limits<openvdb::Int32>::max();
+
+        openvdb::Int32Tree a(/*background=*/1), b(0);
+
+        a.setValueOn(c0);
+        a.setValueOn(c1);
+        a.setValueOn(c2, -1);
+        a.setValueOn(c3, -1);
+        a.setValueOn(c4, 0);
+        b.setValueOn(c1);
+        b.setValueOn(c3);
+
+        openvdb::tools::compDiv(a, b);
+
+        CPPUNIT_ASSERT_EQUAL( inf, a.getValue(c0)); //  1 / 0
+        CPPUNIT_ASSERT_EQUAL( inf, a.getValue(c1)); //  1 / 0
+        CPPUNIT_ASSERT_EQUAL(-inf, a.getValue(c2)); // -1 / 0
+        CPPUNIT_ASSERT_EQUAL(-inf, a.getValue(c3)); // -1 / 0
+        CPPUNIT_ASSERT_EQUAL(   0, a.getValue(c4)); //  0 / 0
+    }
+    {
+        const openvdb::Index32 zero(0), inf = std::numeric_limits<openvdb::Index32>::max();
+
+        openvdb::UInt32Tree a(/*background=*/1), b(0);
+
+        a.setValueOn(c0);
+        a.setValueOn(c1);
+        a.setValueOn(c2, zero);
+        b.setValueOn(c1);
+
+        openvdb::tools::compDiv(a, b);
+
+        CPPUNIT_ASSERT_EQUAL( inf, a.getValue(c0)); //  1 / 0
+        CPPUNIT_ASSERT_EQUAL( inf, a.getValue(c1)); //  1 / 0
+        CPPUNIT_ASSERT_EQUAL(zero, a.getValue(c2)); //  0 / 0
+    }
+
+    // Verify that non-integer-valued grids don't use integer division semantics.
+    {
+        openvdb::FloatTree a(/*background=*/1.0), b(0.0);
+
+        a.setValueOn(c0);
+        a.setValueOn(c1);
+        a.setValueOn(c2, -1.0);
+        a.setValueOn(c3, -1.0);
+        a.setValueOn(c4, 0.0);
+        b.setValueOn(c1);
+        b.setValueOn(c3);
+
+        openvdb::tools::compDiv(a, b);
+
+        CPPUNIT_ASSERT(std::isinf(a.getValue(c0))); //  1 / 0
+        CPPUNIT_ASSERT(std::isinf(a.getValue(c1))); //  1 / 0
+        CPPUNIT_ASSERT(std::isinf(a.getValue(c2))); // -1 / 0
+        CPPUNIT_ASSERT(std::isinf(a.getValue(c3))); // -1 / 0
+        CPPUNIT_ASSERT(std::isnan(a.getValue(c4))); //  0 / 0
+    }
+}
+
+
+void
 TestTreeCombine::testCompReplace()
 {
     testCompRepl<openvdb::FloatTree>();
@@ -235,7 +308,7 @@ template<typename TreeT, typename TreeComp, typename ValueComp>
 void
 TestTreeCombine::testComp(const TreeComp& comp, const ValueComp& op)
 {
-    typedef typename TreeT::ValueType ValueT;
+    using ValueT = typename TreeT::ValueType;
 
     const ValueT
         zero = openvdb::zeroVal<ValueT>(),
@@ -370,7 +443,7 @@ TestTreeCombine::testCombine2()
 
     struct Local {
         static void floatAverage(const float& a, const float& b, float& result)
-            { result = 0.5 * (a + b); }
+            { result = 0.5f * (a + b); }
         static void vec3dAverage(const Vec3d& a, const Vec3d& b, Vec3d& result)
             { result = 0.5 * (a + b); }
         static void vec3dFloatMultiply(const Vec3d& a, const float& b, Vec3d& result)
@@ -528,7 +601,7 @@ template<typename TreeT>
 void
 TestTreeCombine::testCompRepl()
 {
-    typedef typename TreeT::ValueType ValueT;
+    using ValueT = typename TreeT::ValueType;
 
     const ValueT
         zero = openvdb::zeroVal<ValueT>(),
@@ -657,9 +730,9 @@ TestTreeCombine::testCompRepl()
 void
 TestTreeCombine::testCsg()
 {
-    typedef openvdb::FloatTree TreeT;
-    typedef TreeT::Ptr TreePtr;
-    typedef openvdb::Grid<TreeT> GridT;
+    using TreeT = openvdb::FloatTree;
+    using TreePtr = TreeT::Ptr;
+    using GridT = openvdb::Grid<TreeT>;
 
     struct Local {
         static TreePtr readFile(const std::string& fname) {
@@ -682,14 +755,14 @@ TestTreeCombine::testCsg()
             return tree;
         }
 
-        static void writeFile(TreePtr tree, const std::string& filename) {
-            openvdb::io::File file(filename);
-            openvdb::GridPtrVec grids;
-            GridT::Ptr grid = openvdb::createGrid(tree);
-            grid->setName("LevelSet");
-            grids.push_back(grid);
-            file.write(grids);
-        }
+        //static void writeFile(TreePtr tree, const std::string& filename) {
+        //    openvdb::io::File file(filename);
+        //    openvdb::GridPtrVec grids;
+        //    GridT::Ptr grid = openvdb::createGrid(tree);
+        //    grid->setName("LevelSet");
+        //    grids.push_back(grid);
+        //    file.write(grids);
+        //}
 
         static void visitorUnion(TreeT& a, TreeT& b) { openvdb::tools::csgUnion(a, b); }
         static void visitorIntersect(TreeT& a, TreeT& b) { openvdb::tools::csgIntersection(a, b); }
@@ -699,22 +772,22 @@ TestTreeCombine::testCsg()
     TreePtr smallTree1, smallTree2, largeTree1, largeTree2, refTree, outTree;
 
 #if TEST_CSG_VERBOSE
-    Timer timer;
+    openvdb::util::CpuTimer timer;
     timer.start();
 #endif
 
     const std::string testDir("/work/rd/fx_tools/vdb_unittest/TestGridCombine::testCsg/");
     smallTree1 = Local::readFile(testDir + "small1.vdb2 LevelSet");
-    CPPUNIT_ASSERT(smallTree1.get() != NULL);
+    CPPUNIT_ASSERT(smallTree1.get() != nullptr);
     smallTree2 = Local::readFile(testDir + "small2.vdb2 Cylinder");
-    CPPUNIT_ASSERT(smallTree2.get() != NULL);
+    CPPUNIT_ASSERT(smallTree2.get() != nullptr);
     largeTree1 = Local::readFile(testDir + "large1.vdb2 LevelSet");
-    CPPUNIT_ASSERT(largeTree1.get() != NULL);
+    CPPUNIT_ASSERT(largeTree1.get() != nullptr);
     largeTree2 = Local::readFile(testDir + "large2.vdb2 LevelSet");
-    CPPUNIT_ASSERT(largeTree2.get() != NULL);
+    CPPUNIT_ASSERT(largeTree2.get() != nullptr);
 
 #if TEST_CSG_VERBOSE
-    std::cerr << "file read: " << timer.stop() << " sec\n";
+    std::cerr << "file read: " << timer.delta() << " sec\n";
 #endif
 
 #if TEST_CSG_VERBOSE
@@ -722,30 +795,30 @@ TestTreeCombine::testCsg()
 #endif
     refTree = Local::readFile(testDir + "small_union.vdb2");
     outTree = visitCsg(*smallTree1, *smallTree2, *refTree, Local::visitorUnion);
-    //Local::writeFile(outTree, "/tmp/small_union_out.vdb2");
+    //Local::writeFile(outTree, "small_union_out.vdb2");
     refTree = Local::readFile(testDir + "large_union.vdb2");
     outTree = visitCsg(*largeTree1, *largeTree2, *refTree, Local::visitorUnion);
-    //Local::writeFile(outTree, "/tmp/large_union_out.vdb2");
+    //Local::writeFile(outTree, "large_union_out.vdb2");
 
 #if TEST_CSG_VERBOSE
     std::cerr << "\n<intersection>\n";
 #endif
     refTree = Local::readFile(testDir + "small_intersection.vdb2");
     outTree = visitCsg(*smallTree1, *smallTree2, *refTree, Local::visitorIntersect);
-    //Local::writeFile(outTree, "/tmp/small_intersection_out.vdb2");
+    //Local::writeFile(outTree, "small_intersection_out.vdb2");
     refTree = Local::readFile(testDir + "large_intersection.vdb2");
     outTree = visitCsg(*largeTree1, *largeTree2, *refTree, Local::visitorIntersect);
-    //Local::writeFile(outTree, "/tmp/large_intersection_out.vdb2");
+    //Local::writeFile(outTree, "large_intersection_out.vdb2");
 
 #if TEST_CSG_VERBOSE
     std::cerr << "\n<difference>\n";
 #endif
     refTree = Local::readFile(testDir + "small_difference.vdb2");
     outTree = visitCsg(*smallTree1, *smallTree2, *refTree, Local::visitorDiff);
-    //Local::writeFile(outTree, "/tmp/small_difference_out.vdb2");
+    //Local::writeFile(outTree, "small_difference_out.vdb2");
     refTree = Local::readFile(testDir + "large_difference.vdb2");
     outTree = visitCsg(*largeTree1, *largeTree2, *refTree, Local::visitorDiff);
-    //Local::writeFile(outTree, "/tmp/large_difference_out.vdb2");
+    //Local::writeFile(outTree, "large_difference_out.vdb2");
 }
 
 
@@ -754,17 +827,16 @@ typename TreeT::Ptr
 TestTreeCombine::visitCsg(const TreeT& aInputTree, const TreeT& bInputTree,
     const TreeT& refTree, const VisitorT& visitor)
 {
-    typedef typename TreeT::Ptr TreePtr;
+    using TreePtr = typename TreeT::Ptr;
 
 #if TEST_CSG_VERBOSE
-    Timer timer;
-
+    openvdb::util::CpuTimer timer;
     timer.start();
 #endif
     TreePtr aTree(new TreeT(aInputTree));
     TreeT bTree(bInputTree);
 #if TEST_CSG_VERBOSE
-    std::cerr << "deep copy: " << timer.stop() << " sec\n";
+    std::cerr << "deep copy: " << timer.delta() << " ms\n";
 #endif
 
 #if (TEST_CSG_VERBOSE > 1)
@@ -783,7 +855,7 @@ TestTreeCombine::visitCsg(const TreeT& aInputTree, const TreeT& bInputTree,
 #endif
     visitor(*aTree, bTree);
 #if TEST_CSG_VERBOSE
-    std::cerr << "combine: " << timer.stop() << " sec\n";
+    std::cerr << "combine: " << timer.delta() << " ms\n";
 #endif
 #if (TEST_CSG_VERBOSE > 1)
     std::cerr << "\nActual:\n";
@@ -791,8 +863,8 @@ TestTreeCombine::visitCsg(const TreeT& aInputTree, const TreeT& bInputTree,
 #endif
 
     std::ostringstream aInfo, refInfo;
-    aTree->print(aInfo, /*verbose=*/3);
-    refTree.print(refInfo, /*verbose=*/3);
+    aTree->print(aInfo, /*verbose=*/2);
+    refTree.print(refInfo, /*verbose=*/2);
 
     CPPUNIT_ASSERT_EQUAL(refInfo.str(), aInfo.str());
 
@@ -801,6 +873,203 @@ TestTreeCombine::visitCsg(const TreeT& aInputTree, const TreeT& bInputTree,
     return aTree;
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+
+////////////////////////////////////////
+
+
+void
+TestTreeCombine::testCsgCopy()
+{
+    const float voxelSize = 0.2f;
+    const float radius = 3.0f;
+    openvdb::Vec3f center(0.0f, 0.0f, 0.0f);
+
+    openvdb::FloatGrid::Ptr gridA =
+        openvdb::tools::createLevelSetSphere<openvdb::FloatGrid>(radius, center, voxelSize);
+
+    openvdb::Coord ijkA = gridA->transform().worldToIndexNodeCentered(center);
+    CPPUNIT_ASSERT(gridA->tree().getValue(ijkA) < 0.0f); // center is inside
+
+    center.x() += 3.5f;
+
+    openvdb::FloatGrid::Ptr gridB =
+        openvdb::tools::createLevelSetSphere<openvdb::FloatGrid>(radius, center, voxelSize);
+
+    openvdb::Coord ijkB = gridA->transform().worldToIndexNodeCentered(center);
+    CPPUNIT_ASSERT(gridB->tree().getValue(ijkB) < 0.0f); // center is inside
+
+    openvdb::FloatGrid::Ptr unionGrid = openvdb::tools::csgUnionCopy(*gridA, *gridB);
+    openvdb::FloatGrid::Ptr intersectionGrid = openvdb::tools::csgIntersectionCopy(*gridA, *gridB);
+    openvdb::FloatGrid::Ptr differenceGrid = openvdb::tools::csgDifferenceCopy(*gridA, *gridB);
+
+    CPPUNIT_ASSERT(unionGrid.get() != nullptr);
+    CPPUNIT_ASSERT(intersectionGrid.get() != nullptr);
+    CPPUNIT_ASSERT(differenceGrid.get() != nullptr);
+
+    CPPUNIT_ASSERT(!unionGrid->empty());
+    CPPUNIT_ASSERT(!intersectionGrid->empty());
+    CPPUNIT_ASSERT(!differenceGrid->empty());
+
+    // test inside / outside sign
+
+    CPPUNIT_ASSERT(unionGrid->tree().getValue(ijkA) < 0.0f);
+    CPPUNIT_ASSERT(unionGrid->tree().getValue(ijkB) < 0.0f);
+
+    CPPUNIT_ASSERT(!(intersectionGrid->tree().getValue(ijkA) < 0.0f));
+    CPPUNIT_ASSERT(!(intersectionGrid->tree().getValue(ijkB) < 0.0f));
+
+    CPPUNIT_ASSERT(differenceGrid->tree().getValue(ijkA) < 0.0f);
+    CPPUNIT_ASSERT(!(differenceGrid->tree().getValue(ijkB) < 0.0f));
+}
+
+
+////////////////////////////////////////
+
+void
+TestTreeCombine::testCompActiveLeafVoxels()
+{
+    {//replace float tree (default argument)
+        openvdb::FloatTree srcTree(0.0f), dstTree(0.0f);
+
+        dstTree.setValue(openvdb::Coord(1,1,1), 1.0f);
+        srcTree.setValue(openvdb::Coord(1,1,1), 2.0f);
+        srcTree.setValue(openvdb::Coord(8,8,8), 3.0f);
+
+        CPPUNIT_ASSERT_EQUAL(1, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(1.0f, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(0.0f, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(!dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+
+        openvdb::tools::compActiveLeafVoxels(srcTree, dstTree);
+
+        CPPUNIT_ASSERT_EQUAL(2, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(0, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2.0f, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(3.0f, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+    }
+    {//replace float tree (lambda expression)
+        openvdb::FloatTree srcTree(0.0f), dstTree(0.0f);
+
+        dstTree.setValue(openvdb::Coord(1,1,1), 1.0f);
+        srcTree.setValue(openvdb::Coord(1,1,1), 2.0f);
+        srcTree.setValue(openvdb::Coord(8,8,8), 3.0f);
+
+        CPPUNIT_ASSERT_EQUAL(1, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(1.0f, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(0.0f, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(!dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+
+        openvdb::tools::compActiveLeafVoxels(srcTree, dstTree, [](float &d, float s){d=s;});
+
+        CPPUNIT_ASSERT_EQUAL(2, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(0, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2.0f, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(3.0f, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+    }
+    {//add float tree
+        openvdb::FloatTree srcTree(0.0f), dstTree(0.0f);
+
+        dstTree.setValue(openvdb::Coord(1,1,1), 1.0f);
+        srcTree.setValue(openvdb::Coord(1,1,1), 2.0f);
+        srcTree.setValue(openvdb::Coord(8,8,8), 3.0f);
+
+        CPPUNIT_ASSERT_EQUAL(1, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(1.0f, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(0.0f, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(!dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+
+        openvdb::tools::compActiveLeafVoxels(srcTree, dstTree, [](float &d, float s){d+=s;});
+
+        CPPUNIT_ASSERT_EQUAL(2, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(0, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(3.0f, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(3.0f, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+    }
+    {
+        using BufferT = openvdb::FloatTree::LeafNodeType::Buffer;
+        CPPUNIT_ASSERT((std::is_same<BufferT::ValueType, BufferT::StorageType>::value));
+    }
+    {
+        using BufferT = openvdb::Vec3fTree::LeafNodeType::Buffer;
+        CPPUNIT_ASSERT((std::is_same<BufferT::ValueType, BufferT::StorageType>::value));
+    }
+    {
+        using BufferT = openvdb::BoolTree::LeafNodeType::Buffer;
+        CPPUNIT_ASSERT(!(std::is_same<BufferT::ValueType, BufferT::StorageType>::value));
+    }
+    {
+        using BufferT = openvdb::MaskTree::LeafNodeType::Buffer;
+        CPPUNIT_ASSERT(!(std::is_same<BufferT::ValueType, BufferT::StorageType>::value));
+    }
+    {//replace bool tree
+        openvdb::BoolTree srcTree(false), dstTree(false);
+
+        dstTree.setValue(openvdb::Coord(1,1,1), true);
+        srcTree.setValue(openvdb::Coord(1,1,1), false);
+        srcTree.setValue(openvdb::Coord(8,8,8), true);
+        //(9,8,8) is inactive but true so it should have no effect
+        srcTree.setValueOnly(openvdb::Coord(9,8,8), true);
+
+        CPPUNIT_ASSERT_EQUAL(1, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(true, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(false, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(!dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT_EQUAL(true, srcTree.getValue(openvdb::Coord(9, 8, 8)));
+        CPPUNIT_ASSERT(!srcTree.isValueOn(openvdb::Coord(9, 8, 8)));
+
+        using Word = openvdb::BoolTree::LeafNodeType::Buffer::WordType;
+        openvdb::tools::compActiveLeafVoxels(srcTree, dstTree, [](Word &d, Word s){d=s;});
+
+        CPPUNIT_ASSERT_EQUAL(2, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(0, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(false, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(true, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+    }
+    {// mask tree
+        openvdb::MaskTree srcTree(false), dstTree(false);
+
+        dstTree.setValueOn(openvdb::Coord(1,1,1));
+        srcTree.setValueOn(openvdb::Coord(1,1,1));
+        srcTree.setValueOn(openvdb::Coord(8,8,8));
+
+        CPPUNIT_ASSERT_EQUAL(1, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(2, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(true, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(false, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(!dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+
+        openvdb::tools::compActiveLeafVoxels(srcTree, dstTree);
+
+        CPPUNIT_ASSERT_EQUAL(2, int(dstTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(0, int(srcTree.leafCount()));
+        CPPUNIT_ASSERT_EQUAL(true, dstTree.getValue(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(1, 1, 1)));
+        CPPUNIT_ASSERT_EQUAL(true, dstTree.getValue(openvdb::Coord(8, 8, 8)));
+        CPPUNIT_ASSERT(dstTree.isValueOn(openvdb::Coord(8, 8, 8)));
+    }
+}
+
+
+////////////////////////////////////////
+
+
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

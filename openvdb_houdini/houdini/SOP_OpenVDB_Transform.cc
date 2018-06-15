@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -37,78 +37,130 @@
 #include <openvdb_houdini/SOP_NodeVDB.h>
 #include <openvdb/tools/VectorTransformer.h> // for transformVectors()
 #include <UT/UT_Interrupt.h>
+#if UT_VERSION_INT >= 0x10050000 // 16.5.0 or later
+#include <hboost/math/constants/constants.hpp>
+#else
 #include <boost/math/constants/constants.hpp>
+#endif
+#include <stdexcept>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
+#if UT_VERSION_INT < 0x10050000 // earlier than 16.5.0
+namespace hboost = boost;
+#endif
 
 
 class SOP_OpenVDB_Transform: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Transform(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Transform() {};
+    ~SOP_OpenVDB_Transform() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions { OP_ERROR cookVDBSop(OP_Context&) override; };
+#else
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
+    OP_ERROR cookVDBSop(OP_Context&) override;
+#endif
 };
 
 
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
     // Group pattern
     parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
-        .setHelpText("Specify a subset of the input VDB grids to be transformed.")
-        .setChoiceList(&hutil::PrimGroupMenu));
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Specify a subset of the input VDB grids to be transformed.")
+        .setDocumentation(
+            "A subset of the input VDB grids to be transformed"
+            " (see [specifying volumes|/model/volumes#group])"));
 
     // Translation
     parms.add(hutil::ParmFactory(PRM_XYZ_J, "t", "Translate")
         .setVectorSize(3)
-        .setDefault(PRMzeroDefaults));
+        .setDefault(PRMzeroDefaults)
+        .setDocumentation("Apply a translation to the transform."));
 
     // Rotation
     parms.add(hutil::ParmFactory(PRM_XYZ_J, "r", "Rotate")
-        .setHelpText("Rotation specified in ZYX order")
         .setVectorSize(3)
-        .setDefault(PRMzeroDefaults));
+        .setDefault(PRMzeroDefaults)
+        .setTooltip("Rotation specified in ZYX order")
+        .setDocumentation("Apply a rotation, in ZYX order, to the transform."));
 
     // Scale
     parms.add(hutil::ParmFactory(PRM_XYZ_J, "s", "Scale")
         .setVectorSize(3)
-        .setDefault(PRMoneDefaults));
+        .setDefault(PRMoneDefaults)
+        .setDocumentation("Apply a scale to the transform."));
 
     // Pivot
     parms.add(hutil::ParmFactory(PRM_XYZ_J, "p", "Pivot")
         .setVectorSize(3)
-        .setDefault(PRMzeroDefaults));
+        .setDefault(PRMzeroDefaults)
+        .setDocumentation("The pivot point for scaling and rotation"));
 
     // Uniform scale
     parms.add(hutil::ParmFactory(PRM_FLT_J, "uniformScale", "Uniform Scale")
         .setDefault(PRMoneDefaults)
-        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_FREE, 10));
+        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_FREE, 10)
+        .setDocumentation("Apply a uniform scale to the transform."));
 
     // Toggle, inverse
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "invert", "Invert Transformation")
-        .setDefault(PRMzeroDefaults));
+        .setDefault(PRMzeroDefaults)
+        .setDocumentation("Perform the inverse transformation."));
 
     // Toggle, apply transform to vector values
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "xformvectors", "Transform Vectors")
         .setDefault(PRMzeroDefaults)
-        .setHelpText(
+        .setTooltip(
             "Apply the transform to the voxel values of vector-valued grids,\n"
-            "in accordance with those grids' Vector Type attributes.\n"));
-
+            "in accordance with those grids' Vector Type attributes.\n")
+        .setDocumentation(
+            "Apply the transform to the voxel values of vector-valued grids,"
+            " in accordance with those grids' __Vector Type__ attributes (as set,"
+            " for example, with the [OpenVDB Create node|Node:sop/DW_OpenVDBCreate])."));
 
     // Register this operator.
     hvdb::OpenVDBOpFactory("OpenVDB Transform", SOP_OpenVDB_Transform::factory, parms, *table)
-        .addInput("Input with VDB grids to transform");
+        .addInput("Input with VDB grids to transform")
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Transform::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Modify the transforms of VDB volumes.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node modifies the transform associated with each input VDB volume.\n\
+It is usually preferable to use Houdini's native [Transform node|Node:sop/xform],\n\
+except if you want to also transform the _values_ of a vector-valued VDB.\n\
+\n\
+@related\n\
+- [Node:sop/xform]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -145,18 +197,21 @@ struct VecXformOp
 
 
 OP_ERROR
-SOP_OpenVDB_Transform::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Transform)::cookVDBSop(OP_Context& context)
 {
     try {
-        typedef openvdb::math::AffineMap AffineMap;
-        typedef openvdb::math::Transform Transform;
-
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
 
-        const fpreal time = context.getTime();
-
         // This does a shallow copy of VDB-grids and deep copy of native Houdini primitives.
-        duplicateSource(0, context);
+        lock.markInputUnlocked(0);
+        duplicateSourceStealable(0, context);
+#endif
+
+        using AffineMap = openvdb::math::AffineMap;
+        using Transform = openvdb::math::Transform;
+
+        const fpreal time = context.getTime();
 
         // Get UI parameters
         openvdb::Vec3R t(evalVec3R("t", time)), r(evalVec3R("r", time)),
@@ -164,7 +219,7 @@ SOP_OpenVDB_Transform::cookMySop(OP_Context& context)
 
         s *= evalFloat("uniformScale", 0, time);
 
-        int flagInverse = evalInt("invert", 0, time);
+        const bool flagInverse = evalInt("invert", 0, time);
 
         const bool xformVec = evalInt("xformvectors", 0, time);
 
@@ -176,7 +231,7 @@ SOP_OpenVDB_Transform::cookMySop(OP_Context& context)
         UT_AutoInterrupt progress("Transform");
 
         // Build up the transform matrix from the UI parameters
-        const double deg2rad = boost::math::constants::pi<double>() / 180.0;
+        const double deg2rad = hboost::math::constants::pi<double>() / 180.0;
 
         openvdb::Mat4R mat(openvdb::Mat4R::identity());
         mat.preTranslate(p);
@@ -231,6 +286,6 @@ SOP_OpenVDB_Transform::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

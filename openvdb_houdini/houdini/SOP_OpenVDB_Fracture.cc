@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -52,25 +52,39 @@
 #include <GEO/GEO_PointClassifier.h>
 #include <GU/GU_ConvertParms.h>
 #include <UT/UT_Quaternion.h>
-#include <UT/UT_ScopedPtr.h>
 #include <UT/UT_ValArray.h>
 #include <UT/UT_Version.h>
 
+#if UT_VERSION_INT >= 0x10050000 // 16.5.0 or later
+#include <hboost/algorithm/string/join.hpp>
+#include <hboost/math/constants/constants.hpp>
+#else
 #include <boost/algorithm/string/join.hpp>
-#include <boost/random.hpp>
-#include <boost/generator_iterator.hpp>
-#include <boost/random/uniform_real.hpp>
 #include <boost/math/constants/constants.hpp>
+#endif
 
+#include <cmath>
 #include <iostream>
-#include <string>
-#include <sstream>
 #include <limits>
-#include <vector>
 #include <list>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
+
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
+#if UT_VERSION_INT < 0x10050000 // earlier than 16.5.0
+namespace hboost = boost;
+#endif
 
 
 ////////////////////////////////////////
@@ -80,24 +94,35 @@ class SOP_OpenVDB_Fracture: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Fracture(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Fracture() {}
+    ~SOP_OpenVDB_Fracture() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
-    virtual int isRefInput(unsigned i ) const { return (i > 0); }
+    int isRefInput(unsigned i ) const override { return (i > 0); }
+
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions
+    {
+#endif
+    protected:
+        OP_ERROR cookVDBSop(OP_Context&) override;
+
+        template<class GridType>
+        void process(
+            std::list<openvdb::GridBase::Ptr>& grids,
+            const GU_Detail* cutterGeo,
+            const GU_Detail* pointGeo,
+            hvdb::Interrupter&,
+            const fpreal time);
+#if VDB_COMPILABLE_SOP
+    }; // class Cache
+#endif
 
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
+    bool updateParmsFlags() override;
+    void resolveObsoleteParms(PRM_ParmList*) override;
+}; // class SOP_OpenVDB_Fracture
 
-    template <class GridType>
-    void process(
-        std::list<openvdb::GridBase::Ptr>& grids,
-        const GU_Detail* cutterGeo,
-        const GU_Detail* pointGeo,
-        hvdb::Interrupter&,
-        const fpreal time);
-};
 
 ////////////////////////////////////////
 
@@ -106,27 +131,33 @@ protected:
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
     //////////
     // Input options
 
-    parms.add(hutil::ParmFactory(PRM_STRING, "inputgroup", "Group")
-        .setHelpText("Select a subset of the input OpenVDB grids to fracture.")
-        .setChoiceList(&hutil::PrimGroupMenu));
+    parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Select a subset of the input OpenVDB grids to fracture.")
+        .setDocumentation(
+            "A subset of the input VDBs to fracture"
+            " (see [specifying volumes|/model/volumes#group])"));
 
 
     //////////
     // Fracture options
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "separatecutters", "Separate Cutters by Connectivity")
-      .setHelpText("Enable if multiple cutter objects are provided. This option is only available "
-        "without instance points."));
+        .setTooltip(
+            "The cutter geometry will be classified by point connectivity"
+            " and each connected component will be cut separately.\n"
+            "Use this if an individual piece of cutting geometry has overlapping components.\n\n"
+            "This option is not available when cutter instance points are provided."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "cutteroverlap", "Allow Cutter Overlap")
-        .setHelpText("Allow consecutive cutter instances to fracture previously "
-            "generated fragments."));
+        .setTooltip(
+            "Allow consecutive cutter instances to fracture previously generated fragments."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "centercutter", "Center Cutter Geometry")
 #ifndef SESI_OPENVDB
@@ -134,40 +165,61 @@ newSopOperator(OP_OperatorTable* table)
 #else
         .setDefault(PRMzeroDefaults)
 #endif
-        .setHelpText("Pre-center cutter geometry about the origin before instancing."));
+        .setTooltip(
+            "Center the cutter geometry around its point position centroid before instancing."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "randomizerotation", "Randomize Cutter Rotation")
-        .setHelpText("Apply a random rotation to each instance point. This option is only "
-            "available when instance points are provided."));
+        .setTooltip(
+            "Apply a random rotation to the cutter as it is instanced onto each point.\n\n"
+            "This option is only available when cutter instance points are provided."));
 
     parms.add(hutil::ParmFactory(PRM_INT_J, "seed", "Random Seed")
         .setDefault(PRMoneDefaults)
-        .setHelpText("Seed for the random rotation."));
+        .setTooltip("The random number seed for cutter rotations"));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "segmentfragments",
         "Split Input Fragments into Primitives")
-        .setHelpText(
-            "Split grids with disjoint fragments into multiple grids, one per fragment. "
-            "In a chain of fracture nodes this operation is typically only applied"
-            " to the last node. "));
+        .setTooltip(
+            "Split input VDBs with disjoint fragments into multiple primitives,"
+            " one per fragment.\nIn a chain of fracture nodes this operation"
+            " is typically applied only to the last node.")
+        .setDocumentation(
+            "Split input VDBs with disjoint fragments into multiple primitives,"
+            " one per fragment.\n\n"
+"If you have a tube and cut out the middle, the two ends might end up in the\n"
+"same VDB.  This option will detect that and split the ends into two VDBs.\n\n"
+"NOTE:\n"
+"    This operation only needs to be performed if you plan on using the\n"
+"    output fragments for collision detection. If you use multiple fracture\n"
+"    nodes, then it is most efficient to only enable it on the very last\n"
+"    fracture node.\n"));
 
     parms.add(hutil::ParmFactory(PRM_STRING, "fragmentgroup", "Fragment Group")
-        .setHelpText("Specify a group name in order to associate all fragments generated "
+        .setTooltip("Specify a group name with which to associate all fragments generated "
             "by this fracture. The residual fragments of the input grids are excluded "
             "from this group."));
 
     {
-        static const char *visnames[] = {
+        char const * const visnames[] = {
             "none", "None",
             "all",  "Pieces",
             "new",  "New Fragments",
-            0,      0
+            nullptr
         };
         parms.add(hutil::ParmFactory(PRM_ORD, "visualizepieces", "Visualization")
             .setDefault(PRMzeroDefaults)
             .setChoiceListItems(PRM_CHOICELIST_SINGLE, visnames)
-            .setHelpText("Randomize output primitive colors."));
+            .setTooltip("Randomize output primitive colors.")
+            .setDocumentation(
+                "The generated VDBs can be colored uniquely for ease of identification."
+                " The New Fragments option will leave the original pieces with their"
+                " original coloring and assign colors only to newly-created pieces."));
     }
+
+    //////////
+
+    hutil::ParmList obsoleteParms;
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "inputgroup", "Group"));
 
     //////////
 
@@ -176,7 +228,55 @@ newSopOperator(OP_OperatorTable* table)
             "(Required to have matching transforms and narrow band widths)")
         .addInput("Cutter objects (geometry).")
         .addOptionalInput("Optional points to instance the cutter object onto\n"
-            "(The cutter object is used in place if no points are provided.)");
+            "(The cutter object is used in place if no points are provided.)")
+        .setObsoleteParms(obsoleteParms)
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Fracture::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Split level set VDB volumes into pieces.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node splits level set VDB volumes into multiple fragments.\n\
+\n\
+The _cutter_ geometry supplied in the second input determines\n\
+where cuts are made in the source volumes.\n\
+The optional third input specifies points onto which the cutter geometry\n\
+will be instanced, so that even simple geometry can produce complex cuts.\n\
+\n\
+Typically, the input volume is the output of an [OpenVDB from\n\
+Polygons|Node:sop/DW_OpenVDBFromPolygons] node.\n\
+When that is the case, the fractured result can be converted back\n\
+to polygons seamlessly using the\n\
+[OpenVDB Convert|Node:sop/DW_OpenVDBConvert] node\n\
+with the original polygons as the second input.\n\
+\n\
+NOTE:\n\
+    The cutter geometry must be a closed surface but does not need to be\n\
+    manifold. The cutter geometry can contain self intersections and\n\
+    degenerate faces. Normals on the cutter geometry are ignored.\n\
+\n\
+NOTE:\n\
+    The reference points supplied in the optional third input can have\n\
+    attributes that control how the cutter is transformed onto them. This\n\
+    follows the same rules that the [Node:sop/copy] node uses, except\n\
+    for scaling. Scaling an SDF correctly requires that the level set\n\
+    be rebuilt at the same time. Thus you must scale your cutter geometry\n\
+    appropriately first.\n\
+\n\
+@related\n\
+- [OpenVDB Convert|Node:sop/DW_OpenVDBConvert]\n\
+- [OpenVDB From Polygons|Node:sop/DW_OpenVDBFromPolygons]\n\
+- [Node:sop/vdbfracture]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -198,6 +298,18 @@ SOP_OpenVDB_Fracture::SOP_OpenVDB_Fracture(OP_Network* net,
 
 
 ////////////////////////////////////////
+
+
+void
+SOP_OpenVDB_Fracture::resolveObsoleteParms(PRM_ParmList* obsoleteParms)
+{
+    if (!obsoleteParms) return;
+
+    resolveRenamedParm(*obsoleteParms, "inputgroup", "group");
+
+    // Delegate to the base class.
+    hvdb::SOP_NodeVDB::resolveObsoleteParms(obsoleteParms);
+}
 
 
 // Enable or disable parameters in the UI.
@@ -224,12 +336,16 @@ SOP_OpenVDB_Fracture::updateParmsFlags()
 
 
 OP_ERROR
-SOP_OpenVDB_Fracture::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Fracture)::cookVDBSop(OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
+        lock.markInputUnlocked(0);
+        duplicateSourceStealable(0, context);
+#endif
+
         const fpreal time = context.getTime();
-        duplicateSource(0, context);
 
         hvdb::Interrupter boss("Converting geometry to volume");
 
@@ -237,15 +353,13 @@ SOP_OpenVDB_Fracture::cookMySop(OP_Context& context)
         // Validate inputs
 
         const GU_Detail* cutterGeo = inputGeo(1);
-        if (!cutterGeo || !cutterGeo->primitives().entries()) {
+        if (!cutterGeo || !cutterGeo->getNumPrimitives()) {
             // All good, nothing to worry about with no cutting objects!
             return error();
         }
 
-
         std::string warningStr;
-        boost::shared_ptr<GU_Detail> geoPtr =
-            hvdb::validateGeometry(*cutterGeo, warningStr, &boss);
+        auto geoPtr = hvdb::convertGeometry(*cutterGeo, warningStr, &boss);
 
         if (geoPtr) {
             cutterGeo = geoPtr.get();
@@ -254,23 +368,7 @@ SOP_OpenVDB_Fracture::cookMySop(OP_Context& context)
 
         const GU_Detail* pointGeo = inputGeo(2);
 
-        const GA_PrimitiveGroup *group = NULL;
-        {
-            UT_String str;
-            evalString(str, "inputgroup", 0, time);
-            group = matchGroup(*gdp, str.toStdString());
-        }
-
-        //@{
-        /// @todo Is this needed?
-        UT_ValArray<const GA_ElementGroup*>::const_iterator groupIt;
-#if (UT_VERSION_INT >= 0x0d000000) // 13.0.0 or later
-        UT_ValArray<const GA_ElementGroup*> primitiveGroups;
-#else
-        UT_PtrArray<const GA_ElementGroup*> primitiveGroups;
-#endif
-        gdp->primitiveGroups().getList(primitiveGroups);
-        //@}
+        const GA_PrimitiveGroup* group = matchGroup(*gdp, evalStdString("group", time));
 
         std::list<openvdb::GridBase::Ptr> grids;
         std::vector<GU_PrimVDB*> origvdbs;
@@ -294,7 +392,9 @@ SOP_OpenVDB_Fracture::cookMySop(OP_Context& context)
 
             GU_PrimVDB* vdb = vdbIter.getPrimitive();
 
-            grids.push_back(vdb->getGrid().deepCopyGrid());
+            vdb->makeGridUnique();
+
+            grids.push_back(vdb->getGrid().copyGrid());
             grids.back()->setName(vdb->getGridName());
 
             grids.back()->insertMeta("houdiniorigoffset",
@@ -305,13 +405,13 @@ SOP_OpenVDB_Fracture::cookMySop(OP_Context& context)
 
         if (!nonLevelSetList.empty()) {
             std::string s = "The following non level set grids were skipped: '" +
-                boost::algorithm::join(nonLevelSetList, ", ") + "'.";
+                hboost::algorithm::join(nonLevelSetList, ", ") + "'.";
             addWarning(SOP_MESSAGE, s.c_str());
         }
 
         if (!nonLinearList.empty()) {
             std::string s = "The following grids were skipped: '" +
-                boost::algorithm::join(nonLinearList, ", ") +
+                hboost::algorithm::join(nonLinearList, ", ") +
                 "' because they don't have a linear/affine transform.";
             addWarning(SOP_MESSAGE, s.c_str());
         }
@@ -352,16 +452,16 @@ SOP_OpenVDB_Fracture::cookMySop(OP_Context& context)
 ////////////////////////////////////////
 
 
-template <class GridType>
+template<class GridType>
 void
-SOP_OpenVDB_Fracture::process(
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Fracture)::process(
     std::list<openvdb::GridBase::Ptr>& grids,
     const GU_Detail* cutterGeo,
     const GU_Detail* pointGeo,
     hvdb::Interrupter& boss,
     const fpreal time)
 {
-    GA_PrimitiveGroup* group = NULL;
+    GA_PrimitiveGroup* group = nullptr;
 
     // Evaluate the UI parameters.
 
@@ -376,11 +476,10 @@ SOP_OpenVDB_Fracture::process(
 
     const bool randomizeRotation = bool(evalInt("randomizerotation", 0, time));
     const bool cutterOverlap = bool(evalInt("cutteroverlap", 0, time));
-    const int visualization = evalInt("visualizepieces", 0, time);
+    const exint visualization = evalInt("visualizepieces", 0, time);
     const bool segmentFragments = bool(evalInt("segmentfragments", 0, time));
 
-    typedef typename GridType::TreeType TreeType;
-    typedef typename GridType::ValueType ValueType;
+    using ValueType = typename GridType::ValueType;
 
     typename GridType::Ptr firstGrid = openvdb::gridPtrCast<GridType>(grids.front());
     if (!firstGrid) {
@@ -396,7 +495,7 @@ SOP_OpenVDB_Fracture::process(
     std::vector<openvdb::math::Quats> instanceRotations;
 
 #if (UT_VERSION_INT >= 0x0d000035) // 13.0.53 or later
-    if (pointGeo != NULL) {
+    if (pointGeo != nullptr) {
         instancePoints.resize(pointGeo->getNumPoints());
 
         GA_Range range(pointGeo->getPointRange());
@@ -409,10 +508,10 @@ SOP_OpenVDB_Fracture::process(
         // attributes, we need to create an instance matrix.
         if (randomizeRotation || instanceMatrix.hasAnyAttribs()) {
             instanceRotations.resize(instancePoints.size());
-            typedef boost::mt19937 RandGen;
+            using RandGen = std::mt19937;
             RandGen rng(RandGen::result_type(evalInt("seed", 0, time)));
-            boost::uniform_01<RandGen, float> uniform01(rng);
-            const float two_pi = 2.0 * boost::math::constants::pi<float>();
+            std::uniform_real_distribution<float> uniform01;
+            const float two_pi = 2.0f * hboost::math::constants::pi<float>();
             UT_DMatrix4 xform;
             UT_Vector3 trans;
             UT_DMatrix3 rotmat;
@@ -425,11 +524,11 @@ SOP_OpenVDB_Fracture::process(
                     // Generate uniform random rotations by picking random
                     // points in the unit cube and forming the unit quaternion.
 
-                    const float u  = uniform01();
+                    const float u  = uniform01(rng);
                     const float c1 = std::sqrt(1-u);
                     const float c2 = std::sqrt(u);
-                    const float s1 = two_pi * uniform01();
-                    const float s2 = two_pi * uniform01();
+                    const float s1 = two_pi * uniform01(rng);
+                    const float s2 = two_pi * uniform01(rng);
 
                     UT_Quaternion  orient(c1 * std::sin(s1), c1 * std::cos(s1),
                                           c2 * std::sin(s2), c2 * std::cos(s2));
@@ -442,10 +541,12 @@ SOP_OpenVDB_Fracture::process(
                 xform.getTranslates(trans);
                 xform.extractRotate(rotmat);
                 quat.updateFromRotationMatrix(rotmat);
-                instancePoints[i] =
-                    openvdb::Vec3s(trans.x(), trans.y(), trans.z());
-                instanceRotations[i].init(quat.x(), quat.y(), quat.z(),
-                                          quat.w());
+                instancePoints[i] = openvdb::Vec3s(trans.x(), trans.y(), trans.z());
+                instanceRotations[i].init(
+                    static_cast<float>(quat.x()),
+                    static_cast<float>(quat.y()),
+                    static_cast<float>(quat.z()),
+                    static_cast<float>(quat.w()));
             }
         }
         else
@@ -459,7 +560,7 @@ SOP_OpenVDB_Fracture::process(
         }
     }
 #else // before 13.0.53
-    if (pointGeo != NULL) {
+    if (pointGeo != nullptr) {
         instancePoints.resize(pointGeo->getNumPoints());
 
         GA_Range range(pointGeo->getPointRange());
@@ -495,17 +596,17 @@ SOP_OpenVDB_Fracture::process(
 
             // Generate uniform random rotations by picking random points
             // in the unit cube and forming the unit quaternion.
-            typedef boost::mt19937 RandGen;
+            using RandGen = std::mt19937;
             RandGen rng(RandGen::result_type(evalInt("seed", 0, time)));
-            boost::uniform_01<RandGen, float> uniform01(rng);
-            const float two_pi = 2.0 * boost::math::constants::pi<float>();
+            std::uniform_real_distribution<float> uniform01;
+            const float two_pi = 2.0 * hboost::math::constants::pi<float>();
             for (size_t n = 0, N = instanceRotations.size(); n < N; ++n) {
 
-                const float u  = uniform01();
+                const float u  = uniform01(rng);
                 const float c1 = std::sqrt(1-u);
                 const float c2 = std::sqrt(u);
-                const float s1 = two_pi * uniform01();
-                const float s2 = two_pi * uniform01();
+                const float s1 = two_pi * uniform01(rng);
+                const float s2 = two_pi * uniform01(rng);
 
                 instanceRotations[n][0] = c1 * std::sin(s1);
                 instanceRotations[n][1] = c1 * std::cos(s1);
@@ -547,11 +648,11 @@ SOP_OpenVDB_Fracture::process(
 
                     mat4.instance(UT_Vector3(0.0, 0.0, 0.0),
                         normal,
-                        /*s*/1.0, /*s3*/NULL,
-                        attrUp.isValid() ? &up : NULL,
-                        attrRot.isValid() ? &rot : NULL,
-                        /*trans*/NULL,
-                        attrOrient.isValid() ? &orient : NULL);
+                        /*s*/1.0, /*s3*/nullptr,
+                        attrUp.isValid() ? &up : nullptr,
+                        attrRot.isValid() ? &rot : nullptr,
+                        /*trans*/nullptr,
+                        attrOrient.isValid() ? &orient : nullptr);
 
                     quat.updateFromRotationMatrix(UT_Matrix3(mat4));
                     instanceRotations[i].init(quat.x(), quat.y(), quat.z(), quat.w());
@@ -597,21 +698,21 @@ SOP_OpenVDB_Fracture::process(
 
         if (!badTransformList.empty()) {
             std::string s = "The following grids were skipped: '" +
-                boost::algorithm::join(badTransformList, ", ") +
+                hboost::algorithm::join(badTransformList, ", ") +
                 "' because they don't match the transform of the first grid.";
             addWarning(SOP_MESSAGE, s.c_str());
         }
 
         if (!badBackgroundList.empty()) {
             std::string s = "The following grids were skipped: '" +
-                boost::algorithm::join(badBackgroundList, ", ") +
+                hboost::algorithm::join(badBackgroundList, ", ") +
                 "' because they don't match the background value of the first grid.";
             addWarning(SOP_MESSAGE, s.c_str());
         }
 
         if (!badTypeList.empty()) {
             std::string s = "The following grids were skipped: '" +
-                boost::algorithm::join(badTypeList, ", ") +
+                hboost::algorithm::join(badTypeList, ", ") +
                 "' because they don't have the same data type as the first grid.";
             addWarning(SOP_MESSAGE, s.c_str());
         }
@@ -620,7 +721,7 @@ SOP_OpenVDB_Fracture::process(
     // Setup fracture tool
     openvdb::tools::LevelSetFracture<GridType, hvdb::Interrupter> lsFracture(&boss);
 
-    const bool separatecutters = (pointGeo == NULL) && bool(evalInt("separatecutters", 0, time));
+    const bool separatecutters = (pointGeo == nullptr) && bool(evalInt("separatecutters", 0, time));
 
     std::vector<openvdb::Vec3s> pointList;
 
@@ -640,19 +741,25 @@ SOP_OpenVDB_Fracture::process(
     }
 
     // Check for multiple cutter objects
+#if (UT_VERSION_INT >= 0x0e000061) // 14.0.97 or later
+    GEO_PrimClassifier primClassifier;
+    if (separatecutters) {
+        primClassifier.classifyBySharedPoints(*cutterGeo);
+    }
+#else
     GEO_PointClassifier pointClassifier;
     GEO_PrimClassifier primClassifier;
     if (separatecutters) {
         pointClassifier.classifyPoints(*cutterGeo);
         primClassifier.classifyBySharedPoints(*cutterGeo, pointClassifier);
     }
+#endif
 
     const int cutterObjects = separatecutters ? primClassifier.getNumClass() : 1;
-    const ValueType bandWidth = backgroundValue / transform->voxelSize()[0];
+    const float bandWidth = float(backgroundValue / transform->voxelSize()[0]);
 
     if (cutterObjects > 1) {
         GA_Offset start, end;
-        GA_Primitive::const_iterator vtxIt;
         GA_SplittableRange range(cutterGeo->getPrimitiveRange());
 
         for (int classId = 0; classId < cutterObjects; ++classId) {
@@ -663,7 +770,9 @@ SOP_OpenVDB_Fracture::process(
             for (GA_PageIterator pageIt = range.beginPages(); !pageIt.atEnd(); ++pageIt) {
                 for (GA_Iterator blockIt(pageIt.begin()); blockIt.blockAdvance(start, end); ) {
                     for (GA_Offset i = start; i < end; ++i) {
-                        if (primClassifier.getClass(cutterGeo->primitiveIndex(i)) == classId) {
+                        if (classId == primClassifier.getClass(
+                            static_cast<int>(cutterGeo->primitiveIndex(i))))
+                        {
                             ++numPrims;
                         }
                     }
@@ -679,25 +788,33 @@ SOP_OpenVDB_Fracture::process(
                 primList.reserve(numPrims);
 
                 openvdb::Vec4I prim;
-                unsigned int vtx, vtxn;
+                using Vec4IValueType = openvdb::Vec4I::ValueType;
 
                 for (GA_PageIterator pageIt = range.beginPages(); !pageIt.atEnd(); ++pageIt) {
                     for (GA_Iterator blockIt(pageIt.begin()); blockIt.blockAdvance(start, end); ) {
                         for (GA_Offset i = start; i < end; ++i) {
-                            if (primClassifier.getClass(cutterGeo->primitiveIndex(i)) == classId) {
-                                const GA_Primitive* primRef =
-                                    cutterGeo->getPrimitiveList().get(i);
-                                vtxn = primRef->getVertexCount();
+                            if (classId == primClassifier.getClass(
+                                static_cast<int>(cutterGeo->primitiveIndex(i))))
+                            {
+                                const GA_Primitive* primRef = cutterGeo->getPrimitiveList().get(i);
+                                const GA_Size vtxn = primRef->getVertexCount();
 
-                                if (primRef->getTypeId() == GEO_PRIMPOLY &&
+                                if ((primRef->getTypeId() == GEO_PRIMPOLY) &&
                                     (3 == vtxn || 4 == vtxn))
                                 {
-                                    GA_Primitive::const_iterator it;
-                                    for (vtx = 0, primRef->beginVertex(it);
-                                        !it.atEnd(); ++it, ++vtx)
-                                    {
-                                        prim[vtx] = cutterGeo->pointIndex(it.getPointOffset());
+#if UT_MAJOR_VERSION_INT >= 16
+                                    for (GA_Size vtx = 0; vtx < vtxn; ++vtx) {
+                                        prim[int(vtx)] = static_cast<Vec4IValueType>(
+                                            cutterGeo->pointIndex(primRef->getPointOffset(vtx)));
                                     }
+#else
+                                    GA_Primitive::const_iterator it;
+                                    primRef->beginVertex(it);
+                                    for (unsigned int vtx = 0; !it.atEnd(); ++it, ++vtx) {
+                                        prim[vtx] = static_cast<Vec4IValueType>(
+                                            cutterGeo->pointIndex(it.getPointOffset()));
+                                    }
+#endif
 
                                     if (vtxn != 4) prim[3] = openvdb::util::INVALID_IDX;
 
@@ -708,18 +825,17 @@ SOP_OpenVDB_Fracture::process(
                     }
                 }
 
-                openvdb::tools::MeshToVolume<GridType, hvdb::Interrupter>
-                    converter(transform, /*conversion flags*/0, &boss);
+                openvdb::tools::QuadAndTriangleDataAdapter<openvdb::Vec3s, openvdb::Vec4I>
+                    mesh(pointList, primList);
 
-                converter.convertToLevelSet(pointList, primList, bandWidth, bandWidth);
-                cutterGrid = converter.distGridPtr();
-
+                cutterGrid = openvdb::tools::meshToVolume<GridType>(
+                    boss, mesh, *transform, bandWidth, bandWidth);
             }
 
             if (!cutterGrid || cutterGrid->activeVoxelCount() == 0) continue;
 
             lsFracture.fracture(residuals, *cutterGrid, segmentFragments,
-                NULL, NULL, cutterOverlap);
+                nullptr, nullptr, cutterOverlap);
         }
     } else {
 
@@ -733,11 +849,12 @@ SOP_OpenVDB_Fracture::process(
             UTparallelFor(GA_SplittableRange(cutterGeo->getPrimitiveRange()),
                 hvdb::PrimCpyOp(cutterGeo, primList));
 
-            openvdb::tools::MeshToVolume<GridType, hvdb::Interrupter>
-                converter(transform, /*conversion flags*/0, &boss);
 
-            converter.convertToLevelSet(pointList, primList, bandWidth, bandWidth);
-            cutterGrid = converter.distGridPtr();
+            openvdb::tools::QuadAndTriangleDataAdapter<openvdb::Vec3s, openvdb::Vec4I>
+                mesh(pointList, primList);
+
+            cutterGrid = openvdb::tools::meshToVolume<GridType>(
+                boss, mesh, *transform, bandWidth, bandWidth);
         }
 
         if (!cutterGrid || cutterGrid->activeVoxelCount() == 0 || boss.wasInterrupted()) return;
@@ -767,10 +884,6 @@ SOP_OpenVDB_Fracture::process(
     piececount.entries(gdp->getNumPrimitiveOffsets());
     totalpiececount.entries(gdp->getNumPrimitiveOffsets());
 
-    boost::mt19937 rng(1);
-    boost::uniform_real<float> range(0.3, 0.8);
-    boost::variate_generator<boost::mt19937, boost::uniform_real<float> > randNr(rng, range);
-
     GU_ConvertParms parms;
     parms.preserveGroups = true;
 
@@ -789,7 +902,7 @@ SOP_OpenVDB_Fracture::process(
         openvdb::Int64Metadata::Ptr offmeta =
             grid->template getMetadata<openvdb::Int64Metadata>("houdiniorigoffset");
         if (offmeta) {
-            origvdboff = (GA_Offset)offmeta->value();
+            origvdboff = static_cast<GA_Offset>(offmeta->value());
         }
         if (origvdboff != GA_INVALID_OFFSET) {
             totalpiececount(origvdboff)++;
@@ -803,7 +916,7 @@ SOP_OpenVDB_Fracture::process(
         openvdb::Int64Metadata::Ptr offmeta =
             grid->template getMetadata<openvdb::Int64Metadata>("houdiniorigoffset");
         if (offmeta) {
-            origvdboff = (GA_Offset)offmeta->value();
+            origvdboff = static_cast<GA_Offset>(offmeta->value());
         }
         if (origvdboff != GA_INVALID_OFFSET) {
             totalpiececount(origvdboff)++;
@@ -819,7 +932,7 @@ SOP_OpenVDB_Fracture::process(
         openvdb::Int64Metadata::Ptr offmeta =
             grid->template getMetadata<openvdb::Int64Metadata>("houdiniorigoffset");
         if (offmeta) {
-            origvdboff = (GA_Offset)offmeta->value();
+            origvdboff = static_cast<GA_Offset>(offmeta->value());
             grid->removeMeta("houdiniorigoffset");
         }
 
@@ -833,12 +946,12 @@ SOP_OpenVDB_Fracture::process(
             && totalpiececount(origvdboff) > 1)
         {
             UT_WorkBuffer buf;
-            buf.sprintf("%s_%d", (const char *) name, piececount(origvdboff));
+            buf.sprintf("%s_%d", static_cast<const char*>(name), piececount(origvdboff));
             piececount(origvdboff)++;
             name.harden(buf.buffer());
         }
 
-        GU_PrimVDB* vdb = hvdb::createVdbPrimitive(*gdp, grid, (const char *) name);
+        GU_PrimVDB* vdb = hvdb::createVdbPrimitive(*gdp, grid, static_cast<const char*>(name));
 
         if (origvdboff != GA_INVALID_OFFSET)
         {
@@ -870,7 +983,7 @@ SOP_OpenVDB_Fracture::process(
 
         if (name.isstring() && name_h.isValid())
         {
-            name_h.set(vdb->getMapOffset(), (const char *) name);
+            name_h.set(vdb->getMapOffset(), static_cast<const char*>(name));
         }
     }
 
@@ -888,7 +1001,7 @@ SOP_OpenVDB_Fracture::process(
         openvdb::Int64Metadata::Ptr offmeta =
             grid->template getMetadata<openvdb::Int64Metadata>("houdiniorigoffset");
         if (offmeta) {
-            origvdboff = (GA_Offset)offmeta->value();
+            origvdboff = static_cast<GA_Offset>(offmeta->value());
             grid->removeMeta("houdiniorigoffset");
         }
 
@@ -901,11 +1014,11 @@ SOP_OpenVDB_Fracture::process(
         if (name.isstring() && origvdboff != GA_INVALID_OFFSET)
         {
             UT_WorkBuffer buf;
-            buf.sprintf("%s_%d", (const char *) name, piececount(origvdboff));
+            buf.sprintf("%s_%d", static_cast<const char*>(name), piececount(origvdboff));
             piececount(origvdboff)++;
             name.harden(buf.buffer());
         }
-        GU_PrimVDB* vdb = hvdb::createVdbPrimitive(*gdp, grid, (const char *) name);
+        GU_PrimVDB* vdb = hvdb::createVdbPrimitive(*gdp, grid, static_cast<const char*>(name));
         if (origvdboff != GA_INVALID_OFFSET)
         {
             GU_PrimVDB* origvdb =
@@ -927,7 +1040,7 @@ SOP_OpenVDB_Fracture::process(
         }
         if (name.isstring() && name_h.isValid())
         {
-            name_h.set(vdb->getMapOffset(), (const char *) name);
+            name_h.set(vdb->getMapOffset(), static_cast<const char*>(name));
         }
 
         if (group) group->add(vdb);
@@ -942,6 +1055,6 @@ SOP_OpenVDB_Fracture::process(
     }
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

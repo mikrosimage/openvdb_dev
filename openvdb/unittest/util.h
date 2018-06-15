@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -32,7 +32,8 @@
 #define OPENVDB_UNITTEST_UTIL_HAS_BEEN_INCLUDED
 
 #include <openvdb/openvdb.h>
-#include <tbb/tick_count.h>
+#include <openvdb/math/Math.h> // for math::Random01
+#include <openvdb/tools/Prune.h>// for pruneLevelSet
 #include <sstream>
 
 namespace unittest_util {
@@ -47,7 +48,7 @@ enum SphereMode { SPHERE_DENSE, SPHERE_DENSE_NARROW_BAND, SPHERE_SPARSE_NARROW_B
 /// @note This method is VERY SLOW and should only be used for debugging purposes!
 /// However it works for any transform and even with open level sets.
 /// A faster approch for closed narrow band generation is to only set voxels
-/// sparsely and then use grid::signedFloodFill to defined the sign
+/// sparsely and then use grid::signedFloodFill to define the sign
 /// of the background values and tiles! This is implemented in openvdb/tools/LevelSetSphere.h
 template<class GridType>
 inline void
@@ -66,7 +67,7 @@ makeSphere(const openvdb::Coord& dim, const openvdb::Vec3f& center, float radius
         for (xyz[1]=0; xyz[1]<dim[1]; ++xyz[1]) {
             for (xyz[2]=0; xyz[2]<dim[2]; ++xyz[2]) {
                 const openvdb::Vec3R p =  grid.transform().indexToWorld(xyz);
-                const float dist = (p-center).length() - radius;
+                const float dist = float((p-center).length() - radius);
                 ValueT val = ValueT(zero + dist);
                 switch (mode) {
                 case SPHERE_DENSE:
@@ -86,7 +87,8 @@ makeSphere(const openvdb::Coord& dim, const openvdb::Vec3f& center, float radius
             }
         }
     }
-    if (mode == SPHERE_SPARSE_NARROW_BAND) grid.tree().prune();
+    //if (mode == SPHERE_SPARSE_NARROW_BAND) grid.tree().prune();
+    if (mode == SPHERE_SPARSE_NARROW_BAND) openvdb::tools::pruneLevelSet(grid.tree());
 }
 
 // Template specialization for boolean trees (mostly a dummy implementation)
@@ -101,7 +103,7 @@ makeSphere<openvdb::BoolGrid>(const openvdb::Coord& dim, const openvdb::Vec3f& c
         for (xyz[1]=0; xyz[1]<dim[1]; ++xyz[1]) {
             for (xyz[2]=0; xyz[2]<dim[2]; ++xyz[2]) {
                 const openvdb::Vec3R p =  grid.transform().indexToWorld(xyz);
-                const float dist = (p-center).length() - radius;
+                const float dist = static_cast<float>((p-center).length() - radius);
                 if (dist <= 0) acc.setValue(xyz, true);
             }
         }
@@ -118,39 +120,50 @@ makeSphere(const openvdb::Coord& dim, const openvdb::Vec3f& center, float radius
     makeSphere<GridType>(dim, center, radius, grid, mode);
 }
 
-// @todo makePlane
-
-
-////////////////////////////////////////
-
-
-class CpuTimer
+// Generate random points by uniformly distributing points
+// on a unit-sphere.
+inline void genPoints(const int numPoints, std::vector<openvdb::Vec3R>& points)
 {
-public:
-    CpuTimer() {}
-
-    void start(const std::string& msg = std::string("Task"))
-    {
-        std::cerr << msg << " ... ";
-        mT0 = tbb::tick_count::now();
+    // init
+    openvdb::math::Random01 randNumber(0);
+    const int n = int(std::sqrt(double(numPoints)));
+    const double xScale = (2.0 * M_PI) / double(n);
+    const double yScale = M_PI / double(n);
+    
+    double x, y, theta, phi;
+    openvdb::Vec3R pos;
+    
+    points.reserve(n*n);
+    
+    // loop over a [0 to n) x [0 to n) grid.
+    for (int a = 0; a < n; ++a) {
+        for (int b = 0; b < n; ++b) {
+            
+            // jitter, move to random pos. inside the current cell
+            x = double(a) + randNumber();
+            y = double(b) + randNumber();
+            
+            // remap to a lat/long map
+            theta = y * yScale; // [0 to PI]
+            phi   = x * xScale; // [0 to 2PI]
+            
+            // convert to cartesian coordinates on a unit sphere.
+            // spherical coordinate triplet (r=1, theta, phi)
+            pos[0] = std::sin(theta)*std::cos(phi);
+            pos[1] = std::sin(theta)*std::sin(phi);
+            pos[2] = std::cos(theta);
+            
+            points.push_back(pos);
+        }
     }
+}
 
-    void stop() const
-    {
-        tbb::tick_count t1 = tbb::tick_count::now();
-        std::ostringstream ostr;
-        ostr << "completed in " << std::setprecision(3) << (t1 - mT0).seconds() << " sec\n";
-        std::cerr << ostr.str();
-    }
-
-private:
-    tbb::tick_count mT0;
-};// CpuTimer
+// @todo makePlane
 
 } // namespace unittest_util
 
 #endif // OPENVDB_UNITTEST_UTIL_HAS_BEEN_INCLUDED
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

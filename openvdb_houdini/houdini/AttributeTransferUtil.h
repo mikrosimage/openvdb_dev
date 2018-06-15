@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -35,7 +35,7 @@
 #ifndef OPENVDB_HOUDINI_ATTRIBUTE_TRANSFER_UTIL_HAS_BEEN_INCLUDED
 #define OPENVDB_HOUDINI_ATTRIBUTE_TRANSFER_UTIL_HAS_BEEN_INCLUDED
 
-#include <openvdb_houdini/Utils.h>
+#include "Utils.h"
 
 #include <openvdb/openvdb.h>
 #include <openvdb/math/Proximity.h>
@@ -45,8 +45,17 @@
 #include <GA/GA_SplittableRange.h>
 #include <SYS/SYS_Types.h>
 #include <UT/UT_Version.h>
-#include <iostream>
+
+#include <algorithm> // for std::sort()
+#include <cmath> // for std::floor()
+#include <limits>
+#include <memory>
+#include <set>
 #include <sstream>
+#include <string>
+#include <type_traits>
+#include <vector>
+
 
 namespace openvdb_houdini {
 
@@ -151,7 +160,8 @@ evalAttr<openvdb::Vec3d>(const GA_Attribute* atr, const GA_AIFTuple* aif,
 
 ////////////////////////////////////////
 
-/// Combine differnet value types.
+
+/// Combine different value types.
 
 template <typename ValueType> inline ValueType
 combine(const ValueType& v0, const ValueType& v1, const ValueType& v2,
@@ -204,7 +214,7 @@ template <> inline openvdb::Vec3d
 combine(const openvdb::Vec3d& v0, const openvdb::Vec3d& v1,
     const openvdb::Vec3d& v2, const openvdb::Vec3d& w)
 {
-    openvdb::Vec3s vec;
+    openvdb::Vec3d vec;
 
     vec[0] = v0[0] * w[0] + v1[0] * w[1] + v2[0] * w[2];
     vec[1] = v0[1] * w[0] + v1[1] * w[1] + v2[1] * w[2];
@@ -216,9 +226,9 @@ combine(const openvdb::Vec3d& v0, const openvdb::Vec3d& v1,
 
 ////////////////////////////////////////
 
-/// Gets OpenVDB specific value by evaluating GA_Default::get()
-/// with appropriate arguments.
 
+/// @brief Get an OpenVDB-specific value by evaluating GA_Default::get()
+/// with appropriate arguments.
 template <typename ValueType> inline ValueType
 evalAttrDefault(const GA_Defaults& defaults, int idx)
 {
@@ -228,7 +238,7 @@ evalAttrDefault(const GA_Defaults& defaults, int idx)
 }
 
 template <> inline float
-evalAttrDefault<float>(const GA_Defaults& defaults, int idx)
+evalAttrDefault<float>(const GA_Defaults& defaults, int /*idx*/)
 {
     fpreal32 value;
     defaults.get(0, value);
@@ -305,6 +315,94 @@ evalAttrDefault<openvdb::Vec3d>(const GA_Defaults& defaults, int)
     return vec;
 }
 
+template <> inline openvdb::math::Quat<float>
+evalAttrDefault<openvdb::math::Quat<float>>(const GA_Defaults& defaults, int)
+{
+    openvdb::math::Quat<float> quat;
+    fpreal32 value;
+
+    for (int i = 0; i < 4; i++) {
+        defaults.get(i, value);
+        quat[i] = float(value);
+    }
+
+    return quat;
+}
+
+template <> inline openvdb::math::Quat<double>
+evalAttrDefault<openvdb::math::Quat<double>>(const GA_Defaults& defaults, int)
+{
+    openvdb::math::Quat<double> quat;
+    fpreal64 value;
+
+    for (int i = 0; i < 4; i++) {
+        defaults.get(i, value);
+        quat[i] = double(value);
+    }
+
+    return quat;
+}
+
+template <> inline openvdb::math::Mat3<float>
+evalAttrDefault<openvdb::math::Mat3<float>>(const GA_Defaults& defaults, int)
+{
+    openvdb::math::Mat3<float> mat;
+    fpreal64 value;
+    float* data = mat.asPointer();
+
+    for (int i = 0; i < 9; i++) {
+        defaults.get(i, value);
+        data[i] = float(value);
+    }
+
+    return mat;
+}
+
+template <> inline openvdb::math::Mat3<double>
+evalAttrDefault<openvdb::math::Mat3<double>>(const GA_Defaults& defaults, int)
+{
+    openvdb::math::Mat3<double> mat;
+    fpreal64 value;
+    double* data = mat.asPointer();
+
+    for (int i = 0; i < 9; i++) {
+        defaults.get(i, value);
+        data[i] = double(value);
+    }
+
+    return mat;
+}
+
+template <> inline openvdb::math::Mat4<float>
+evalAttrDefault<openvdb::math::Mat4<float>>(const GA_Defaults& defaults, int)
+{
+    openvdb::math::Mat4<float> mat;
+    fpreal64 value;
+    float* data = mat.asPointer();
+
+    for (int i = 0; i < 16; i++) {
+        defaults.get(i, value);
+        data[i] = float(value);
+    }
+
+    return mat;
+}
+
+template <> inline openvdb::math::Mat4<double>
+evalAttrDefault<openvdb::math::Mat4<double>>(const GA_Defaults& defaults, int)
+{
+    openvdb::math::Mat4<double> mat;
+    fpreal64 value;
+    double* data = mat.asPointer();
+
+    for (int i = 0; i < 16; i++) {
+        defaults.get(i, value);
+        data[i] = double(value);
+    }
+
+    return mat;
+}
+
 
 ////////////////////////////////////////
 
@@ -312,9 +410,12 @@ evalAttrDefault<openvdb::Vec3d>(const GA_Defaults& defaults, int)
 class AttributeDetailBase
 {
 public:
-    typedef boost::shared_ptr<AttributeDetailBase> Ptr;
+    using Ptr = std::shared_ptr<AttributeDetailBase>;
 
-    virtual ~AttributeDetailBase() {}
+    virtual ~AttributeDetailBase() = default;
+
+    AttributeDetailBase(const AttributeDetailBase&) = default;
+    AttributeDetailBase& operator=(const AttributeDetailBase&) = default;
 
     virtual void set(const openvdb::Coord& ijk, const GA_Offset (&offsets)[3],
         const openvdb::Vec3d& weights) = 0;
@@ -331,7 +432,7 @@ protected:
 };
 
 
-typedef std::vector<AttributeDetailBase::Ptr> AttributeDetailList;
+using AttributeDetailList = std::vector<AttributeDetailBase::Ptr>;
 
 
 ////////////////////////////////////////
@@ -341,7 +442,7 @@ template <class VDBGridType>
 class AttributeDetail: public AttributeDetailBase
 {
 public:
-    typedef typename VDBGridType::ValueType ValueType;
+    using ValueType = typename VDBGridType::ValueType;
 
     AttributeDetail(
         openvdb::GridBase::Ptr grid,
@@ -351,14 +452,14 @@ public:
         const bool isVector = false);
 
     void set(const openvdb::Coord& ijk, const GA_Offset (&offsets)[3],
-        const openvdb::Vec3d& weights);
+        const openvdb::Vec3d& weights) override;
 
-    void set(const openvdb::Coord& ijk, GA_Offset offset);
+    void set(const openvdb::Coord& ijk, GA_Offset offset) override;
 
-    openvdb::GridBase::Ptr& grid() { return mGrid; }
-    std::string& name() { return mName; }
+    openvdb::GridBase::Ptr& grid() override { return mGrid; }
+    std::string& name() override { return mName; }
 
-    AttributeDetailBase::Ptr copy();
+    AttributeDetailBase::Ptr copy() override;
 
 protected:
     AttributeDetail();
@@ -376,8 +477,8 @@ private:
 
 template <class VDBGridType>
 AttributeDetail<VDBGridType>::AttributeDetail():
-    mAttribute(NULL),
-    mTupleAIF(NULL),
+    mAttribute(nullptr),
+    mTupleAIF(nullptr),
     mTupleIndex(0)
 {
 }
@@ -447,12 +548,11 @@ AttributeDetail<VDBGridType>::copy()
 
 // TBB object to transfer mesh attributes.
 // Only quads and/or triangles are supported
-// NOTE: This class has all code in the header and so it cannot have
-//       OPENVDB_HOUDINI_API.
+// NOTE: This class has all code in the header and so it cannot have OPENVDB_HOUDINI_API.
 class MeshAttrTransfer
 {
 public:
-    typedef openvdb::tree::IteratorRange<openvdb::Int32Tree::LeafCIter> IterRange;
+    using IterRange = openvdb::tree::IteratorRange<openvdb::Int32Tree::LeafCIter>;
 
     inline
     MeshAttrTransfer(
@@ -548,12 +648,13 @@ MeshAttrTransfer::operator()(IterRange &range) const
     openvdb::Int32Tree::LeafNodeType::ValueOnCIter iter;
 
     openvdb::Coord ijk;
-    unsigned int vtx, vtxn;
 
     const bool ptnAttrTransfer = mPointAttributes.size() > 0;
     const bool vtxAttrTransfer = mVertexAttributes.size() > 0;
 
+#if UT_MAJOR_VERSION_INT < 16
     GA_Primitive::const_iterator it;
+#endif
     GA_Offset vtxOffsetList[4], ptnOffsetList[4], vtxOffsets[3], ptnOffsets[3], prmOffset;
     openvdb::Vec3d ptnList[4], xyz, cpt, cpt2, uvw, uvw2;
 
@@ -576,13 +677,23 @@ MeshAttrTransfer::operator()(IterRange &range) const
             // Transfer vertex and point attributes
             const GA_Primitive * primRef = mMeshGdp.getPrimitiveList().get(prmOffset);
 
-            vtxn = primRef->getVertexCount();
+            const GA_Size vtxn = primRef->getVertexCount();
 
             // Get vertex and point offests
+#if UT_MAJOR_VERSION_INT >= 16
+            for (GA_Size vtx = 0; vtx < vtxn; ++vtx) {
+                const GA_Offset vtxoff = primRef->getVertexOffset(vtx);
+                ptnOffsetList[vtx] = mMeshGdp.vertexPoint(vtxoff);
+                vtxOffsetList[vtx] = vtxoff;
+
+                UT_Vector3 p = mMeshGdp.getPos3(ptnOffsetList[vtx]);
+                ptnList[vtx][0] = double(p[0]);
+                ptnList[vtx][1] = double(p[1]);
+                ptnList[vtx][2] = double(p[2]);
+            }
+#else
             primRef->beginVertex(it);
-
-            for (vtx = 0; !it.atEnd(); ++it, ++vtx) {
-
+            for (unsigned int vtx = 0; !it.atEnd(); ++it, ++vtx) {
                 ptnOffsetList[vtx] = it.getPointOffset();
                 vtxOffsetList[vtx] = it.getVertexOffset();
 
@@ -591,6 +702,7 @@ MeshAttrTransfer::operator()(IterRange &range) const
                 ptnList[vtx][1] = double(p[1]);
                 ptnList[vtx][2] = double(p[2]);
             }
+#endif
 
             xyz = mTransform.indexToWorld(ijk);
 
@@ -639,24 +751,20 @@ MeshAttrTransfer::operator()(IterRange &range) const
 
 // TBB object to transfer mesh attributes.
 // Only quads and/or triangles are supported
-// NOTE: This class has all code in the header and so it cannot have
-//       OPENVDB_HOUDINI_API.
+// NOTE: This class has all code in the header and so it cannot have OPENVDB_HOUDINI_API.
 class PointAttrTransfer
 {
 public:
-    typedef openvdb::tree::IteratorRange<openvdb::Int32Tree::LeafCIter> IterRange;
+    using IterRange = openvdb::tree::IteratorRange<openvdb::Int32Tree::LeafCIter>;
 
-    inline
-    PointAttrTransfer(
+    inline PointAttrTransfer(
         AttributeDetailList &pointAttributes,
         const openvdb::Int32Grid& closestPtnIdxGrid,
         const GU_Detail& ptGeop);
 
-    inline
-    PointAttrTransfer(const PointAttrTransfer &other);
+    inline PointAttrTransfer(const PointAttrTransfer &other);
 
-    inline
-    ~PointAttrTransfer() {}
+    inline ~PointAttrTransfer() {}
 
     /// Main calls
     inline void runParallel();
@@ -742,7 +850,7 @@ PointAttrTransfer::operator()(IterRange &range) const
 
 struct AttributeCopyBase
 {
-    typedef boost::shared_ptr<AttributeCopyBase> Ptr;
+    using Ptr = std::shared_ptr<AttributeCopyBase>;
 
     virtual ~AttributeCopyBase() {}
     virtual void copy(GA_Offset /*source*/, GA_Offset /*target*/) = 0;
@@ -765,7 +873,7 @@ public:
     {
     }
 
-    void copy(GA_Offset source, GA_Offset target)
+    void copy(GA_Offset source, GA_Offset target) override
     {
         ValueType data;
         for (int i = 0; i < mTupleSize; ++i) {
@@ -775,15 +883,14 @@ public:
     }
 
     void copy(GA_Offset& v0, GA_Offset& v1, GA_Offset& v2, GA_Offset target,
-        const openvdb::Vec3d& uvw)
+        const openvdb::Vec3d& uvw) override
     {
         doCopy<ValueType>(v0, v1, v2, target, uvw);
     }
 
 private:
-
-    template <typename T>
-    typename boost::enable_if<boost::is_integral<T>, void>::type
+    template<typename T>
+    typename std::enable_if<std::is_integral<T>::value>::type
     doCopy(GA_Offset& v0, GA_Offset& v1, GA_Offset& v2, GA_Offset target, const openvdb::Vec3d& uvw)
     {
         GA_Offset source = v0;
@@ -804,7 +911,7 @@ private:
     }
 
     template <typename T>
-    typename boost::enable_if<boost::is_floating_point<T>, void>::type
+    typename std::enable_if<std::is_floating_point<T>::value>::type
     doCopy(GA_Offset& v0, GA_Offset& v1, GA_Offset& v2, GA_Offset target, const openvdb::Vec3d& uvw)
     {
         ValueType a, b, c;
@@ -835,7 +942,7 @@ public:
     {
     }
 
-    void copy(GA_Offset source, GA_Offset target)
+    void copy(GA_Offset source, GA_Offset target) override
     {
         for (int i = 0; i < mTupleSize; ++i) {
             mAIF.setString(&mTargetAttr, target, mAIF.getString(&mSourceAttr, source, i), i);
@@ -843,7 +950,7 @@ public:
     }
 
     void copy(GA_Offset& v0, GA_Offset& v1, GA_Offset& v2, GA_Offset target,
-        const openvdb::Vec3d& uvw)
+        const openvdb::Vec3d& uvw) override
     {
         GA_Offset source = v0;
         double min = uvw[0];
@@ -929,8 +1036,8 @@ findClosestPrimitiveToPoint(
 {
     std::set<GA_Index>::const_iterator it = primitives.begin();
 
-    GA_Offset primOffset;
-    const GA_Primitive * primRef = NULL;
+    GA_Offset primOffset = GA_INVALID_OFFSET;
+    const GA_Primitive * primRef = nullptr;
     double minDist = std::numeric_limits<double>::max();
 
     openvdb::Vec3d a, b, c, d, tmpUVW;
@@ -1004,8 +1111,8 @@ findClosestPrimitiveToPoint(
     const GU_Detail& geo, std::vector<GA_Index>& primitives, const openvdb::Vec3d& p,
     GA_Offset& vert0, GA_Offset& vert1, GA_Offset& vert2, openvdb::Vec3d& uvw)
 {
-    GA_Offset primOffset;
-    const GA_Primitive * primRef = NULL;
+    GA_Offset primOffset = GA_INVALID_OFFSET;
+    const GA_Primitive * primRef = nullptr;
     double minDist = std::numeric_limits<double>::max();
 
     openvdb::Vec3d a, b, c, d, tmpUVW;
@@ -1077,6 +1184,7 @@ findClosestPrimitiveToPoint(
     return primOffset;
 }
 
+
 ////////////////////////////////////////
 
 
@@ -1116,16 +1224,19 @@ template<class GridType>
 void
 TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& range) const
 {
+    using IndexT = typename GridType::ValueType;
+
     GA_Offset start, end, source, target, v0, v1, v2;
-    const GA_Primitive * primRef = NULL;
+    const GA_Primitive * primRef = nullptr;
+#if UT_MAJOR_VERSION_INT <= 15
     GA_Primitive::const_iterator vtxIt;
+#endif
 
     typename GridType::ConstAccessor acc = mIndexGrid.getConstAccessor();
     const openvdb::math::Transform& transform = mIndexGrid.transform();
     openvdb::Vec3d pos, indexPos, uvw;
     openvdb::Coord ijk, coord;
     std::vector<GA_Index> primitives(8), similar_primitives(8);
-    int count;
 
     UT_Vector3 targetN, sourceN;
 
@@ -1136,20 +1247,30 @@ TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& ra
                 primRef = mTargetGeo.getPrimitiveList().get(target);
                 targetN = mTargetGeo.getGEOPrimitive(target)->computeNormal();
 
-                if (mPrimAttributes.size() != 0 ) {
+                if (mPrimAttributes.size() != 0) {
 
                     // Compute avg. vertex position
                     pos[0] = 0.0;
                     pos[1] = 0.0;
                     pos[2] = 0.0;
-                    count = 0;
 
+#if UT_MAJOR_VERSION_INT >= 16
+                    int count = static_cast<int>(primRef->getVertexCount());
+                    for (int vtx = 0; vtx < count; ++vtx) {
+                        const UT_Vector3 p = primRef->getPos3(vtx);
+                        pos[0] += p.x();
+                        pos[1] += p.y();
+                        pos[2] += p.z();
+                    }
+#else
+                    int count = 0;
                     for (primRef->beginVertex(vtxIt); !vtxIt.atEnd(); ++vtxIt, ++count) {
                         const UT_Vector3 p = mTargetGeo.getPos3(vtxIt.getPointOffset());
                         pos[0] += p.x();
                         pos[1] += p.y();
                         pos[2] += p.z();
                     }
+#endif
 
                     if (count > 1) pos *= (1.0 / float(count));
                     indexPos = transform.worldToIndex(pos);
@@ -1161,15 +1282,15 @@ TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& ra
 
                     primitives.clear();
                     similar_primitives.clear();
-                    int primIndex;
+                    IndexT primIndex;
 
                     for (int d = 0; d < 8; ++d) {
-                        ijk[0] = coord[0] + ((d & 0x02) >> 1 ^ d & 0x01);
+                        ijk[0] = coord[0] + (((d & 0x02) >> 1) ^ (d & 0x01));
                         ijk[1] = coord[1] + ((d & 0x02) >> 1);
                         ijk[2] = coord[2] + ((d & 0x04) >> 2);
 
                         if (acc.probeValue(ijk, primIndex) &&
-                            primIndex != openvdb::util::INVALID_IDX) {
+                            openvdb::Index32(primIndex) != openvdb::util::INVALID_IDX) {
 
                             GA_Offset tmpOffset = mSourceGeo.primitiveOffset(primIndex);
                             sourceN = mSourceGeo.getGEOPrimitive(tmpOffset)->computeNormal();
@@ -1200,10 +1321,13 @@ TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& ra
                 }
 
                 if (mVertAttributes.size() != 0) {
+#if UT_MAJOR_VERSION_INT >= 16
+                    for (GA_Size vtx = 0, vtxN = primRef->getVertexCount(); vtx < vtxN; ++vtx) {
+                        const UT_Vector3 p = primRef->getPos3(vtx);
+#else
                     for (primRef->beginVertex(vtxIt); !vtxIt.atEnd(); ++vtxIt) {
-
-
                         const UT_Vector3 p = mTargetGeo.getPos3(vtxIt.getPointOffset());
+#endif
                         pos[0] = p.x();
                         pos[1] = p.y();
                         pos[2] = p.z();
@@ -1218,12 +1342,12 @@ TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& ra
                         similar_primitives.clear();
 
                         for (int d = 0; d < 8; ++d) {
-                            ijk[0] = coord[0] + ((d & 0x02) >> 1 ^ d & 0x01);
+                            ijk[0] = coord[0] + (((d & 0x02) >> 1) ^ (d & 0x01));
                             ijk[1] = coord[1] + ((d & 0x02) >> 1);
                             ijk[2] = coord[2] + ((d & 0x04) >> 2);
 
                             if (acc.probeValue(ijk, primIndex) &&
-                                primIndex != openvdb::util::INVALID_IDX) {
+                                openvdb::Index32(primIndex) != openvdb::util::INVALID_IDX) {
 
                                 GA_Offset tmpOffset = mSourceGeo.primitiveOffset(primIndex);
                                 sourceN = mSourceGeo.getGEOPrimitive(tmpOffset)->computeNormal();
@@ -1245,7 +1369,12 @@ TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& ra
                             }
 
                             for (size_t n = 0, N = mVertAttributes.size(); n < N; ++n) {
+#if UT_MAJOR_VERSION_INT >= 16
+                                mVertAttributes[n]->copy(v0, v1, v2,
+                                    primRef->getVertexOffset(vtx), uvw);
+#else
                                 mVertAttributes[n]->copy(v0, v1, v2, vtxIt.getVertexOffset(), uvw);
+#endif
                             }
                         }
                     }
@@ -1258,6 +1387,7 @@ TransferPrimitiveAttributesOp<GridType>::operator()(const GA_SplittableRange& ra
 
 ////////////////////////////////////////
 
+
 template<class GridType>
 class TransferPointAttributesOp
 {
@@ -1265,7 +1395,7 @@ public:
     TransferPointAttributesOp(
         const GU_Detail& sourceGeo, GU_Detail& targetGeo, const GridType& indexGrid,
         std::vector<AttributeCopyBase::Ptr>& pointAttributes,
-        const GA_PrimitiveGroup* surfacePrims = NULL);
+        const GA_PrimitiveGroup* surfacePrims = nullptr);
 
     void operator()(const GA_SplittableRange&) const;
 private:
@@ -1293,6 +1423,8 @@ template<class GridType>
 void
 TransferPointAttributesOp<GridType>::operator()(const GA_SplittableRange& range) const
 {
+    using IndexT = typename GridType::ValueType;
+
     GA_Offset start, end, vtxOffset, primOffset, target, v0, v1, v2;
 
     typename GridType::ConstAccessor acc = mIndexGrid.getConstAccessor();
@@ -1338,15 +1470,15 @@ TransferPointAttributesOp<GridType>::operator()(const GA_SplittableRange& range)
                 coord[2] = int(std::floor(indexPos[2]));
 
                 primitives.clear();
-                int primIndex;
+                IndexT primIndex;
 
                 for (int d = 0; d < 8; ++d) {
-                    ijk[0] = coord[0] + ((d & 0x02) >> 1 ^ d & 0x01);
+                    ijk[0] = coord[0] + (((d & 0x02) >> 1) ^ (d & 0x01));
                     ijk[1] = coord[1] + ((d & 0x02) >> 1);
                     ijk[2] = coord[2] + ((d & 0x04) >> 2);
 
                     if (acc.probeValue(ijk, primIndex) &&
-                        primIndex != openvdb::util::INVALID_IDX) {
+                        openvdb::Index32(primIndex) != openvdb::util::INVALID_IDX) {
                         primitives.push_back(primIndex);
                     }
                 }
@@ -1378,7 +1510,7 @@ transferPrimitiveAttributes(
     GU_Detail& targetGeo,
     GridType& indexGrid,
     Interrupter& boss,
-    const GA_PrimitiveGroup *primitives = NULL)
+    const GA_PrimitiveGroup* primitives = nullptr)
 {
     // Match public primitive attributes
     GA_AttributeDict::iterator it = sourceGeo.primitiveAttribs().begin(GA_SCOPE_PUBLIC);
@@ -1389,12 +1521,18 @@ transferPrimitiveAttributes(
 
     // Primitive attributes
     for (; !it.atEnd(); ++it) {
-        if (!targetGeo.findPrimitiveAttribute(it.name()).isValid()) {
-            targetGeo.addPrimAttrib(it.attrib());
-        }
-
         const GA_Attribute* sourceAttr = it.attrib();
+#if (UT_VERSION_INT >= 0x0e0000b0) // 14.0.176 or later
+        if (nullptr == targetGeo.findPrimitiveAttribute(it.name())) {
+            targetGeo.addPrimAttrib(sourceAttr);
+        }
+        GA_Attribute* targetAttr = targetGeo.findPrimitiveAttribute(it.name());
+#else
+        if (!targetGeo.findPrimitiveAttribute(it.name()).isValid()) {
+            targetGeo.addPrimAttrib(sourceAttr);
+        }
         GA_Attribute* targetAttr = targetGeo.findPrimitiveAttribute(it.name()).getAttribute();
+#endif
 
         if (sourceAttr && targetAttr) {
             AttributeCopyBase::Ptr att = createAttributeCopier(*sourceAttr, *targetAttr);
@@ -1410,12 +1548,18 @@ transferPrimitiveAttributes(
 
     // Vertex attributes
     for (; !it.atEnd(); ++it) {
-        if (!targetGeo.findVertexAttribute(it.name()).isValid()) {
-            targetGeo.addVertexAttrib(it.attrib());
-        }
-
         const GA_Attribute* sourceAttr = it.attrib();
+#if (UT_VERSION_INT >= 0x0e0000b0) // 14.0.176 or later
+        if (nullptr == targetGeo.findVertexAttribute(it.name())) {
+            targetGeo.addVertexAttrib(sourceAttr);
+        }
+        GA_Attribute* targetAttr = targetGeo.findVertexAttribute(it.name());
+#else
+        if (!targetGeo.findVertexAttribute(it.name()).isValid()) {
+            targetGeo.addVertexAttrib(sourceAttr);
+        }
         GA_Attribute* targetAttr = targetGeo.findVertexAttribute(it.name()).getAttribute();
+#endif
 
         if (sourceAttr && targetAttr) {
 #if (UT_VERSION_INT >= 0x0c01007D) // 12.1.125 or later
@@ -1440,12 +1584,19 @@ transferPrimitiveAttributes(
         // Point attributes
         for (; !it.atEnd(); ++it) {
             if (std::string(it.name()) == "P") continue; // Ignore previous point positions.
-            if (!targetGeo.findPointAttribute(it.name()).isValid()) {
-                targetGeo.addPointAttrib(it.attrib());
-            }
 
             const GA_Attribute* sourceAttr = it.attrib();
+#if (UT_VERSION_INT >= 0x0e0000b0) // 14.0.176 or later
+            if (nullptr == targetGeo.findPointAttribute(it.name())) {
+                targetGeo.addPointAttrib(sourceAttr);
+            }
+            GA_Attribute* targetAttr = targetGeo.findPointAttribute(it.name());
+#else
+            if (!targetGeo.findPointAttribute(it.name()).isValid()) {
+                targetGeo.addPointAttrib(sourceAttr);
+            }
             GA_Attribute* targetAttr = targetGeo.findPointAttribute(it.name()).getAttribute();
+#endif
 
             if (sourceAttr && targetAttr) {
                 AttributeCopyBase::Ptr att = createAttributeCopier(*sourceAttr, *targetAttr);
@@ -1466,6 +1617,6 @@ transferPrimitiveAttributes(
 
 #endif // OPENVDB_HOUDINI_ATTRIBUTE_TRANSFER_UTIL_HAS_BEEN_INCLUDED
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

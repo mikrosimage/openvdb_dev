@@ -1,4 +1,4 @@
-# Copyright (c) 2012-2013 DreamWorks Animation LLC
+# Copyright (c) 2012-2018 DreamWorks Animation LLC
 #
 # All rights reserved. This software is distributed under the
 # Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -29,11 +29,15 @@
 
 # Targets:
 #   all                 [default target] all Maya plugins
-#   install             install plugins, scripts, etc. into MAYA_INSTALL_DIR
+#   install             install plugins, scripts, etc. into MAYA_DESTDIR
 #   clean               delete generated files from the local directory
 #   depend              recompute source file header dependencies
+#   header_test         check for missing or indirectly included headers
 #
 # Options:
+#   abi=N               build for compatibility with version N of the
+#                       OpenVDB Grid ABI, where N is 2, 3, 4, etc.
+#                       (some newer features will be disabled)
 #   bits=32|64          build for 32-bit or 64-bit environments (default: 64)
 #   debug=yes           build with debugging symbols and without optimization
 #   verbose=yes         run commands in verbose mode
@@ -41,7 +45,7 @@
 
 #
 # The following variables must be defined, either here or on the command line
-# (e.g., "make install INSTALL_DIR=/usr/local"):
+# (e.g., "make install DESTDIR=/usr/local"):
 #
 # Note that the OpenVDB library and these Maya plugins must be built
 # against compatible versions of the Boost, OpenEXR and TBB libraries.
@@ -50,31 +54,37 @@
 MAYA_LOCATION = /s/apps/packages/cgDev/mayaAPI/2016.ext2/platform-linux
 # MAYA_LOCATION should be set to the directory where Maya is installed.
 ifeq (,$(MAYA_LOCATION))
-$(warning Warning: $$(MAYA_LOCATION) is not set)
+	$(warning Warning: $$(MAYA_LOCATION) is not set)
 endif
 
 
 # The directory into which to install libraries and header files
-# (it is recommended that this match the INSTALL_DIR in the OpenVDB
+# (it is recommended that this match the DESTDIR in the OpenVDB
 # library makefile)
-INSTALL_DIR := /tmp/OpenVDB
+DESTDIR := /tmp/OpenVDB
+
+# The directory into which to install libraries (e.g., for Linux multiarch support)
+DESTDIR_LIB_DIR := $(DESTDIR)/lib
 
 # The directory into which to install Maya plugins, scripts, etc.
-MAYA_INSTALL_DIR := $(INSTALL_DIR)/maya
+MAYA_DESTDIR := $(DESTDIR)/maya
 
 # The parent directory of the openvdb/ header directory
-OPENVDB_INCL_DIR := $(INSTALL_DIR)/include
+OPENVDB_INCL_DIR := $(DESTDIR)/include
 # The directory containing libopenvdb
-OPENVDB_LIB_DIR := $(INSTALL_DIR)/lib
+OPENVDB_LIB_DIR := $(DESTDIR_LIB_DIR)
 OPENVDB_LIB := -lopenvdb
 
 # The parent directory of the boost/ header directory
 BOOST_INCL_DIR := /s/apps/packages/dev/boost/1.61.0/platform-linux/build-release/include
+# The directory containing libboost_iostreams, libboost_system, etc.
+BOOST_LIB_DIR := /s/apps/packages/dev/boost/1.61.0/platform-linux/build-release/lib
+BOOST_LIB := -lboost_iostreams -lboost_system
 
 # The parent directory of the OpenEXR/ header directory (which contains half.h)
-HALF_INCL_DIR := /s/apps/packages/cgDev/ilmbase/2.2.0.mikros.0.1/platform-linux/include/OpenEXR
+ILMBASE_INCL_DIR := /s/apps/packages/cgDev/ilmbase/2.2.0.mikros.0.1/platform-linux/include
 # The directory containing libHalf
-HALF_LIB_DIR := /s/apps/packages/cgDev/ilmbase/2.2.0.mikros.0.1/platform-linux/lib
+ILMBASE_LIB_DIR := /s/apps/packages/cgDev/ilmbase/2.2.0.mikros.0.1/platform-linux/lib
 HALF_LIB := -lHalf
 
 # The parent directory of the tbb/ header directory
@@ -92,6 +102,10 @@ SHELL = /bin/bash
 
 # Turn off implicit rules for speed
 .SUFFIXES:
+
+ifneq (,$(INSTALL_DIR))
+    $(warning Warning: $$(INSTALL_DIR) is no longer used; set $$(DESTDIR) instead.)
+endif
 
 # Determine the platform.
 ifeq ("$(OS)","Windows_NT")
@@ -124,13 +138,20 @@ endif
 INCLDIRS := \
     -I . \
     -I $(OPENVDB_INCL_DIR) \
-    -I $(BOOST_INCL_DIR) \
-    -I $(HALF_INCL_DIR) \
-    -I $(TBB_INCL_DIR) \
-    -I $(MAYA_INCL_DIR) \
+    -isystem $(BOOST_INCL_DIR) \
+    -isystem $(ILMBASE_INCL_DIR) \
+    -isystem $(TBB_INCL_DIR) \
+    -isystem $(MAYA_INCL_DIR) \
 #
 
+CXXFLAGS += -std=c++11
+
 CXXFLAGS += -pthread $(OPTIMIZE) $(INCLDIRS)
+abi := $(strip $(abi))
+ifneq (,$(abi))
+    CXXFLAGS += -DOPENVDB_3_ABI_COMPATIBLE  # TODO: deprecated
+    CXXFLAGS += -DOPENVDB_ABI_VERSION_NUMBER=$(abi)
+endif
 # From $(MAYA_LOCATION)/devkit/plug-ins/buildconfig:
 CXXFLAGS += \
     -D_BOOL \
@@ -162,21 +183,22 @@ ifdef LINUX
     endif
 endif
 ifdef MBSD
-	# Darwin ld treats undefined symbols as errors by default;
-	# change to runtime resolution, like Linux.
+    # Darwin ld treats undefined symbols as errors by default;
+    # change to runtime resolution, like Linux.
     CXXFLAGS += -undefined dynamic_lookup
 endif
 
 MAYA_LIBS := \
-	-lOpenMayaFX \
+    -lOpenMayaFX \
     -lOpenMaya \
     -lFoundation \
 #
 
 LIBS := \
     -Wl,-rpath,$(OPENVDB_LIB_DIR) -L$(OPENVDB_LIB_DIR) $(OPENVDB_LIB) \
-    -Wl,-rpath,$(HALF_LIB_DIR) -L$(HALF_LIB_DIR) $(HALF_LIB) \
+    -Wl,-rpath,$(ILMBASE_LIB_DIR) -L$(ILMBASE_LIB_DIR) $(HALF_LIB) \
     -Wl,-rpath,$(TBB_LIB_DIR) -L$(TBB_LIB_DIR) $(TBB_LIB) \
+    -Wl,-rpath,$(BOOST_LIB_DIR) -L$(BOOST_LIB_DIR) $(BOOST_LIB) \
     -Wl,-rpath,$(MAYA_LOCATION)/lib -L$(MAYA_LOCATION)/lib $(MAYA_LIBS) \
     -ldl -lm -lz \
 #
@@ -192,6 +214,7 @@ MAYA_SRC_NAMES := \
     maya/OpenVDBFromPolygonsNode.cc \
     maya/OpenVDBPlugin.cc \
     maya/OpenVDBReadNode.cc \
+    maya/OpenVDBToPolygonsNode.cc \
     maya/OpenVDBTransformNode.cc \
     maya/OpenVDBUtil.cc \
     maya/OpenVDBVisualizeNode.cc \
@@ -199,6 +222,7 @@ MAYA_SRC_NAMES := \
 #
 MAYA_INCLUDE_NAMES := \
     maya/OpenVDBData.h \
+    maya/OpenVDBPlugin.h \
     maya/OpenVDBUtil.h \
 #
 
@@ -208,6 +232,7 @@ MAYA_SCRIPTS := \
     maya/AEOpenVDBFromMayaFluidTemplate.mel \
     maya/AEOpenVDBFromPolygonsTemplate.mel \
     maya/AEOpenVDBReadTemplate.mel \
+    maya/AEOpenVDBToPolygonsTemplate.mel \
     maya/AEOpenVDBTransformTemplate.mel \
     maya/AEOpenVDBVisualizeTemplate.mel \
     maya/AEOpenVDBWriteTemplate.mel \
@@ -237,7 +262,7 @@ ALL_TARGETS := \
 
 .SUFFIXES: .o .cc
 
-.PHONY: all clean depend install
+.PHONY: all clean depend header_test install
 
 .cc.o:
 	@echo "Building $@ because of $(call list_deps)"
@@ -258,14 +283,14 @@ $(MAYA_SO_NAME): $(MAYA_OBJ_NAMES)
 	$(CXX) $(CXXFLAGS) -fPIC -Wl,-Bsymbolic -shared -o $@ $^ $(LIBS)
 
 install: $(MAYA_SO_NAME)
-	mkdir -p $(MAYA_INSTALL_DIR)/plugins
-	@echo "Created $(MAYA_INSTALL_DIR)/plugins"
-	cp -f $(MAYA_SO_NAME) $(MAYA_INSTALL_DIR)/plugins/
-	@echo "Copied $(MAYA_SO_NAME) to $(MAYA_INSTALL_DIR)/plugins/"
-	mkdir -p $(MAYA_INSTALL_DIR)/scripts
-	@echo "Created $(MAYA_INSTALL_DIR)/scripts"
-	cp -f $(MAYA_SCRIPTS) $(MAYA_INSTALL_DIR)/scripts/
-	@echo "Copied MEL scripts to $(MAYA_INSTALL_DIR)/scripts/"
+	mkdir -p $(MAYA_DESTDIR)/plugins
+	@echo "Created $(MAYA_DESTDIR)/plugins"
+	cp -f $(MAYA_SO_NAME) $(MAYA_DESTDIR)/plugins/
+	@echo "Copied $(MAYA_SO_NAME) to $(MAYA_DESTDIR)/plugins/"
+	mkdir -p $(MAYA_DESTDIR)/scripts
+	@echo "Created $(MAYA_DESTDIR)/scripts"
+	cp -f $(MAYA_SCRIPTS) $(MAYA_DESTDIR)/scripts/
+	@echo "Copied MEL scripts to $(MAYA_DESTDIR)/scripts/"
 
 # TODO: This accumulates all source file dependencies into a single file
 # containing a rule for each *.o file.  Consider generating a separate
@@ -275,18 +300,27 @@ $(DEPEND): $(ALL_INCLUDE_FILES) $(ALL_SRC_FILES)
 	$(RM) $(DEPEND)
 	for f in $(ALL_SRC_FILES); \
 		do $(CXX) $(CXXFLAGS) -O0 -MM $$f -MT `echo $$f | sed 's%\.[^.]*%.o%'` \
-			-I $(MAYA_INCL_DIR) >> $(DEPEND); \
+			-isystem $(MAYA_INCL_DIR) >> $(DEPEND); \
 	done
 
 depend: $(DEPEND)
 
+# Compile an implicit translation unit for each header to identify any indirect includes
+HEADER_TEST_FILES := $(addprefix header_test-,$(MAYA_INCLUDE_NAMES))
+$(HEADER_TEST_FILES): header_test-%:
+	echo "#include \"$*\"" | $(CXX) -c -x c++ $(CXXFLAGS) \
+	    -isystem $(MAYA_INCL_DIR) -fPIC -o /dev/null -
+echo_header_test:
+	@echo "Checking for missing or indirectly included headers"
+header_test: echo_header_test $(HEADER_TEST_FILES)
+
 clean:
 	$(RM) $(ALL_TARGETS) $(DEPEND) $(MAYA_OBJ_NAMES)
 
-ifneq ($(strip $(wildcard $(DEPEND))),)
+ifneq (,$(strip $(wildcard $(DEPEND))))
     include $(DEPEND)
 endif
 
-# Copyright (c) 2012-2013 DreamWorks Animation LLC
+# Copyright (c) 2012-2018 DreamWorks Animation LLC
 # All rights reserved. This software is distributed under the
 # Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

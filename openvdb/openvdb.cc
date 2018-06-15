@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -29,8 +29,15 @@
 ///////////////////////////////////////////////////////////////////////////
 
 #include "openvdb.h"
+//#ifdef OPENVDB_ENABLE_POINTS
+#include "points/PointDataGrid.h"
+//#endif
+#include "tools/PointIndexGrid.h"
+#include "util/logging.h"
 #include <tbb/mutex.h>
-
+#ifdef OPENVDB_USE_BLOSC
+#include <blosc.h>
+#endif
 
 namespace openvdb {
 OPENVDB_USE_VERSION_NAMESPACE
@@ -39,15 +46,19 @@ namespace OPENVDB_VERSION_NAME {
 typedef tbb::mutex Mutex;
 typedef Mutex::scoped_lock Lock;
 
+namespace {
 // Declare this at file scope to ensure thread-safe initialization.
 Mutex sInitMutex;
 bool sIsInitialized = false;
+}
 
 void
 initialize()
 {
     Lock lock(sInitMutex);
     if (sIsInitialized) return;
+
+    logging::initialize();
 
     // Register metadata.
     Metadata::clearRegistry();
@@ -80,15 +91,33 @@ initialize()
     // Register common grid types.
     GridBase::clearRegistry();
     BoolGrid::registerGrid();
+    MaskGrid::registerGrid();
     FloatGrid::registerGrid();
     DoubleGrid::registerGrid();
     Int32Grid::registerGrid();
     Int64Grid::registerGrid();
-    HermiteGrid::registerGrid();
     StringGrid::registerGrid();
     Vec3IGrid::registerGrid();
     Vec3SGrid::registerGrid();
     Vec3DGrid::registerGrid();
+
+    // Register types associated with point index grids.
+    Metadata::registerType(typeNameAsString<PointIndex32>(), Int32Metadata::createMetadata);
+    Metadata::registerType(typeNameAsString<PointIndex64>(), Int64Metadata::createMetadata);
+    tools::PointIndexGrid::registerGrid();
+
+    // Register types associated with point data grids.
+//#ifdef OPENVDB_ENABLE_POINTS
+    points::internal::initialize();
+//#endif
+
+#ifdef OPENVDB_USE_BLOSC
+    blosc_init();
+    if (blosc_set_compressor("lz4") < 0) {
+        OPENVDB_LOG_WARN("Blosc LZ4 compressor is unavailable");
+    }
+    /// @todo blosc_set_nthreads(int nthreads);
+#endif
 
 #ifdef __ICC
 // Disable ICC "assignment to statically allocated variable" warning.
@@ -124,11 +153,21 @@ __pragma(warning(default:1711))
     Metadata::clearRegistry();
     GridBase::clearRegistry();
     math::MapRegistry::clear();
+
+//#ifdef OPENVDB_ENABLE_POINTS
+    points::internal::uninitialize();
+//#endif
+
+#ifdef OPENVDB_USE_BLOSC
+    // We don't want to destroy Blosc, because it might have been
+    // initialized by some other library.
+    //blosc_destroy();
+#endif
 }
 
 } // namespace OPENVDB_VERSION_NAME
 } // namespace openvdb
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -35,106 +35,68 @@
 #include <houdini_utils/ParmFactory.h>
 #include <openvdb_houdini/Utils.h>
 #include <openvdb_houdini/SOP_NodeVDB.h>
+#include <openvdb/math/Math.h> // for isFinite()
+#include <openvdb/tools/ChangeBackground.h>
 #include <openvdb/tools/Composite.h>
 #include <openvdb/tools/GridTransformer.h> // for resampleToMatch()
 #include <openvdb/tools/LevelSetRebuild.h> // for levelSetRebuild()
 #include <openvdb/tools/Morphology.h> // for deactivate()
+#include <openvdb/tools/Prune.h>
+#include <openvdb/tools/SignedFloodFill.h>
 #include <openvdb/util/NullInterrupter.h>
 #include <PRM/PRM_Parm.h>
 #include <UT/UT_Interrupt.h>
+#include <UT/UT_Version.h>
+#include <algorithm> // for std::min()
+#include <cctype> // for isspace()
+#include <iomanip>
+#include <set>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
+
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
 
+namespace {
 
-/// @brief SOP to combine two VDB grids via various arithmetic operations
-class SOP_OpenVDB_Combine: public hvdb::SOP_NodeVDB
-{
-public:
-    enum Operation {
-        OP_COPY_A,            // A
-        OP_COPY_B,            // B
-        OP_INVERT,            // 1 - A
-        OP_ADD,               // A + B
-        OP_SUBTRACT,          // A - B
-        OP_MULTIPLY,          // A * B
-        OP_DIVIDE,            // A / B
-        OP_MAXIMUM,           // max(A, B)
-        OP_MINIMUM,           // min(A, B)
-        OP_BLEND1,            // (1 - A) * B
-        OP_BLEND2,            // A + (1 - A) * B
-        OP_UNION,             // CSG A u B
-        OP_INTERSECTION,      // CSG A n B
-        OP_DIFFERENCE,        // CSG A / B
-        OP_REPLACE,           // replace A with B
-        OP_TOPO_UNION,        // A u active(B)
-        OP_TOPO_INTERSECTION, // A n active(B)
-        OP_TOPO_DIFFERENCE    // A / active(B)
-    };
-    enum { OP_FIRST = OP_COPY_A, OP_LAST = OP_TOPO_DIFFERENCE };
+//
+// Operations
+//
 
-    static const char* const sOpMenuItems[];
-
-    static Operation asOp(int i, Operation defaultOp = OP_COPY_A)
-    {
-        return (i >= OP_FIRST && i <= OP_LAST)
-            ? static_cast<Operation>(i) : defaultOp;
-    }
-
-    enum ResampleMode {
-        RESAMPLE_OFF,    // don't auto-resample grids
-        RESAMPLE_B,      // resample B to match A
-        RESAMPLE_A,      // resample A to match B
-        RESAMPLE_HI_RES, // resample higher-res grid to match lower-res
-        RESAMPLE_LO_RES  // resample lower-res grid to match higher-res
-    };
-    enum { RESAMPLE_MODE_FIRST = RESAMPLE_OFF, RESAMPLE_MODE_LAST = RESAMPLE_LO_RES };
-
-    static const char* const sResampleModeMenuItems[];
-
-    static ResampleMode asResampleMode(int i, ResampleMode defaultMode = RESAMPLE_B)
-    {
-        return (i >= RESAMPLE_MODE_FIRST && i <= RESAMPLE_MODE_LAST)
-            ? static_cast<ResampleMode>(i) : defaultMode;
-    }
-
-    SOP_OpenVDB_Combine(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Combine() {}
-
-    static OP_Node* factory(OP_Network*, const char*, OP_Operator*);
-
-    fpreal getTime() { return mTime; }
-
-protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
-    virtual void resolveObsoleteParms(PRM_ParmList*);
-
-private:
-    fpreal mTime;
-    bool mWasCompositeSOP;
-
-    template<typename> struct DispatchOp;
-    struct CombineOp;
-
-    hvdb::GridPtr combineGrids(Operation,
-        hvdb::GridCPtr aGrid, hvdb::GridCPtr bGrid,
-        const UT_String& aGridName, const UT_String& bGridName,
-        ResampleMode resample);
-
-    bool needAGrid(Operation op) const
-        { return (op != OP_COPY_B); }
-    bool needBGrid(Operation op) const
-        { return (op != OP_COPY_A && op != OP_INVERT); }
-    bool needLevelSets(Operation op) const
-        { return (op == OP_UNION || op == OP_INTERSECTION || op == OP_DIFFERENCE); }
+enum Operation {
+    OP_COPY_A,            // A
+    OP_COPY_B,            // B
+    OP_INVERT,            // 1 - A
+    OP_ADD,               // A + B
+    OP_SUBTRACT,          // A - B
+    OP_MULTIPLY,          // A * B
+    OP_DIVIDE,            // A / B
+    OP_MAXIMUM,           // max(A, B)
+    OP_MINIMUM,           // min(A, B)
+    OP_BLEND1,            // (1 - A) * B
+    OP_BLEND2,            // A + (1 - A) * B
+    OP_UNION,             // CSG A u B
+    OP_INTERSECTION,      // CSG A n B
+    OP_DIFFERENCE,        // CSG A / B
+    OP_REPLACE,           // replace A with B
+    OP_TOPO_UNION,        // A u active(B)
+    OP_TOPO_INTERSECTION, // A n active(B)
+    OP_TOPO_DIFFERENCE    // A / active(B)
 };
-
+enum { OP_FIRST = OP_COPY_A, OP_LAST = OP_TOPO_DIFFERENCE };
 
 //#define TIMES " \xd7 " // ISO-8859 multiplication symbol
 #define TIMES " * "
-const char* const SOP_OpenVDB_Combine::sOpMenuItems[] = {
+const char* const sOpMenuItems[] = {
     "copya",                "Copy A",
     "copyb",                "Copy B",
     "inverta",              "Invert A",
@@ -153,17 +115,116 @@ const char* const SOP_OpenVDB_Combine::sOpMenuItems[] = {
     "topounion",            "Activity Union",
     "topointersect",        "Activity Intersection",
     "topodifference",       "Activity Difference",
-    NULL
+    nullptr
 };
 #undef TIMES
 
-const char* const SOP_OpenVDB_Combine::sResampleModeMenuItems[] = {
+inline Operation
+asOp(int i, Operation defaultOp = OP_COPY_A)
+{
+    return (i >= OP_FIRST && i <= OP_LAST)
+        ? static_cast<Operation>(i) : defaultOp;
+}
+
+inline bool needAGrid(Operation op) { return (op != OP_COPY_B); }
+inline bool needBGrid(Operation op) { return (op != OP_COPY_A && op != OP_INVERT); }
+inline bool needLevelSets(Operation op)
+{
+    return (op == OP_UNION || op == OP_INTERSECTION || op == OP_DIFFERENCE);
+}
+
+//
+// Resampling options
+//
+
+enum ResampleMode {
+    RESAMPLE_OFF,    // don't auto-resample grids
+    RESAMPLE_B,      // resample B to match A
+    RESAMPLE_A,      // resample A to match B
+    RESAMPLE_HI_RES, // resample higher-res grid to match lower-res
+    RESAMPLE_LO_RES  // resample lower-res grid to match higher-res
+};
+enum { RESAMPLE_MODE_FIRST = RESAMPLE_OFF, RESAMPLE_MODE_LAST = RESAMPLE_LO_RES };
+
+const char* const sResampleModeMenuItems[] = {
     "off",      "Off",
     "btoa",     "B to Match A",
     "atob",     "A to Match B",
     "hitolo",   "Higher-res to Match Lower-res",
     "lotohi",   "Lower-res to Match Higher-res",
-    NULL
+    nullptr
+};
+
+inline ResampleMode
+asResampleMode(exint i, ResampleMode defaultMode = RESAMPLE_B)
+{
+    return (i >= RESAMPLE_MODE_FIRST && i <= RESAMPLE_MODE_LAST)
+        ? static_cast<ResampleMode>(i) : defaultMode;
+}
+
+
+//
+// Collation options
+//
+
+enum CollationMode {
+    COLL_PAIRS = 0,
+    COLL_A_WITH_1ST_B,
+    COLL_FLATTEN_A,
+    COLL_FLATTEN_B_TO_A,
+    COLL_FLATTEN_A_GROUPS
+};
+
+inline CollationMode
+asCollation(const std::string& str)
+{
+    if (str == "pairs")          return COLL_PAIRS;
+    if (str == "awithfirstb")    return COLL_A_WITH_1ST_B;
+    if (str == "flattena")       return COLL_FLATTEN_A;
+    if (str == "flattenbtoa")    return COLL_FLATTEN_B_TO_A;
+    if (str == "flattenagroups") return COLL_FLATTEN_A_GROUPS;
+
+    throw std::runtime_error{"invalid collation mode \"" + str + "\""};
+}
+
+} // anonymous namespace
+
+
+/// @brief SOP to combine two VDB grids via various arithmetic operations
+class SOP_OpenVDB_Combine: public hvdb::SOP_NodeVDB
+{
+public:
+    SOP_OpenVDB_Combine(OP_Network*, const char* name, OP_Operator*);
+    ~SOP_OpenVDB_Combine() override {}
+
+    static OP_Node* factory(OP_Network*, const char*, OP_Operator*);
+
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions
+    {
+#endif
+    public:
+        fpreal getTime() const { return mTime; }
+    protected:
+        OP_ERROR cookVDBSop(OP_Context&) override;
+    private:
+        hvdb::GridPtr combineGrids(Operation,
+            hvdb::GridCPtr aGrid, hvdb::GridCPtr bGrid,
+            const UT_String& aGridName, const UT_String& bGridName,
+            ResampleMode resample);
+
+        fpreal mTime = 0.0;
+#if VDB_COMPILABLE_SOP
+    }; // class Cache
+#endif
+
+protected:
+    bool updateParmsFlags() override;
+    void resolveObsoleteParms(PRM_ParmList*) override;
+
+private:
+    template<typename> struct DispatchOp;
+    struct CombineOp;
 };
 
 
@@ -173,114 +234,241 @@ const char* const SOP_OpenVDB_Combine::sResampleModeMenuItems[] = {
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
     // Group A
-    parms.add(hutil::ParmFactory(PRM_STRING, "groupA", "Group A")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setHelpText("Use a subset of the first input as the A grid(s)."));
+    parms.add(hutil::ParmFactory(PRM_STRING, "agroup", "Group A")
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Use a subset of the first input as the A VDB(s).")
+        .setDocumentation(
+            "The VDBs to be used from the first input"
+            " (see [specifying volumes|/model/volumes#group])"));
 
     // Group B
-    parms.add(hutil::ParmFactory(PRM_STRING, "groupB", "Group B")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setSpareData(&SOP_Node::theSecondInput)
-        .setHelpText("Use a subset of the second input as the B grid(s)."));
+    parms.add(hutil::ParmFactory(PRM_STRING, "bgroup", "Group B")
+        .setChoiceList(&hutil::PrimGroupMenuInput2)
+        .setTooltip("Use a subset of the second input as the B VDB(s).")
+        .setDocumentation(
+            "The VDBs to be used from the second input"
+            " (see [specifying volumes|/model/volumes#group])"));
 
-    // Toggle to enable flattening B into A.
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "flatten", "Flatten All B into A")
-        .setDefault(PRMzeroDefaults));
-
-    // Toggle to enable/disable A/B pairing
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "pairs", "Combine A/B Pairs")
-        .setDefault(PRMoneDefaults)
-        .setHelpText(
-            "If disabled, combine each grid in group A\n"
-            "with the first grid in group B.  Otherwise,\n"
-            "pair A and B grids in the order that they\n"
-            "appear in their respective groups."));
-
-
+    parms.add(hutil::ParmFactory(PRM_STRING, "collation", "Collation")
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
+            "pairs",          "Combine A/B Pairs",
+            "awithfirstb",    "Combine Each A With First B",
+            "flattena",       "Flatten All A",
+            "flattenbtoa",    "Flatten All B Into First A",
+            "flattenagroups", "Flatten A Groups"
+        })
+        .setDefault("pairs")
+        .setTooltip("Specify the order in which to combine VDBs from the A and/or B groups.")
+        .setDocumentation("\
+The order in which to combine VDBs from the _A_ and/or _B_ groups\n\
+\n\
+Combine _A_/_B_ Pairs:\n\
+    Combine pairs of _A_ and _B_ VDBs, in the order in which they appear\n\
+    in their respective groups.\n\
+Combine Each _A_ With First _B_:\n\
+    Combine each _A_ VDB with the first _B_ VDB.\n\
+Flatten All _A_:\n\
+    Collapse all of the _A_ VDBs into a single output VDB.\n\
+Flatten All _B_ Into First _A_:\n\
+    Accumulate each _B_ VDB into the first _A_ VDB, producing a single output VDB.\n\
+Flatten _A_ Groups:\n\
+    Collapse VDBs within each _A_ group, producing one output VDB for each group.\n\
+\n\
+    Space-separated group patterns are treated as distinct groups in this mode.\n\
+    For example, \"`@name=x* @name=y*`\" results in two output VDBs\n\
+    (provided that there is at least one _A_ VDB whose name starts with `x`\n\
+    and at least one whose name starts with `y`).\n\
+"));
     // Menu of available operations
     parms.add(hutil::ParmFactory(PRM_ORD, "operation", "Operation")
         .setDefault(PRMzeroDefaults)
-        .setChoiceListItems(PRM_CHOICELIST_SINGLE, SOP_OpenVDB_Combine::sOpMenuItems));
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, sOpMenuItems)
+        .setDocumentation("\
+Each voxel that is active in either of the input VDBs\n\
+will be processed with this operation.\n\
+\n\
+Copy _A_:\n\
+    Use _A_, ignore _B_.\n\
+\n\
+Copy _B_:\n\
+    Use _B_, ignore _A_.\n\
+\n\
+Invert _A_:\n\
+    Use 0 &minus; _A_.\n\
+\n\
+Add:\n\
+    Add the values of _A_ and _B_.\n\
+\n\
+NOTE:\n\
+    Using this for fog volumes, which have density values between 0 and 1,\n\
+    will push densities over 1 and cause a bright interface between the\n\
+    input volumes when rendered.  To avoid this problem, try using the\n\
+    _A_&nbsp;+&nbsp;(1&nbsp;&minus;&nbsp;_A_)&nbsp;&times;&nbsp;_B_\n\
+    operation.\n\
+\n\
+Subtract:\n\
+    Subtract the values of _B_ from the values of _A_.\n\
+\n\
+Multiply:\n\
+    Multiply the values of _A_ and _B_.\n\
+\n\
+Divide:\n\
+    Divide the values of _A_ by _B_.\n\
+\n\
+Maximum:\n\
+    Use the maximum of each corresponding value from _A_ and _B_.\n\
+\n\
+NOTE:\n\
+    Using this for fog volumes, which have density values between 0 and 1,\n\
+    can produce a dark interface between the inputs when rendered, due to\n\
+    the binary nature of choosing a value from either from _A_ or _B_.\n\
+    To avoid this problem, try using the\n\
+    (1&nbsp;&minus;&nbsp;_A_)&nbsp;&times;&nbsp;_B_ operation.\n\
+\n\
+Minimum:\n\
+    Use the minimum of each corresponding value from _A_ and _B_.\n\
+\n\
+(1&nbsp;&minus;&nbsp;_A_)&nbsp;&times;&nbsp;_B_:\n\
+    This is similar to SDF Difference, except for fog volumes,\n\
+    and can also be viewed as \"soft cutout\" operation.\n\
+    It is typically used to clear out an area around characters\n\
+    in a dust simulation or some other environmental volume.\n\
+\n\
+_A_&nbsp;+&nbsp;(1&nbsp;&minus;&nbsp;_A_)&nbsp;&times;&nbsp;_B_:\n\
+    This is similar to SDF Union, except for fog volumes, and\n\
+    can also be viewed as a \"soft union\" or \"merge\" operation.\n\
+    Consider using this over the Maximum or Add operations\n\
+    for fog volumes.\n\
+\n\
+SDF Union:\n\
+    Generate the union of signed distance fields _A_ and _B_.\n\
+\n\
+SDF Intersection:\n\
+    Generate the intersection of signed distance fields _A_ and _B_.\n\
+\n\
+SDF Difference:\n\
+    Remove signed distance field _B_ from signed distance field _A_.\n\
+\n\
+Replace _A_ with Active _B_:\n\
+    Copy the active voxels of _B_ into _A_.\n\
+\n\
+Activity Union:\n\
+    Make voxels active if they are active in either _A_ or _B_.\n\
+\n\
+Activity Intersection:\n\
+    Make voxels active if they are active in both _A_ and _B_.\n\
+\n\
+    It is recommended to enable pruning when using this operation.\n\
+\n\
+Activity Difference:\n\
+    Make voxels active if they are active in _A_ but not in _B_.\n\
+\n\
+    It is recommended to enable pruning when using this operation.\n"));
 
     // Scalar multiplier on the A grid
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "mult_a", "A Multiplier")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "amult", "A Multiplier")
         .setDefault(PRMoneDefaults)
         .setRange(PRM_RANGE_UI, -10, PRM_RANGE_UI, 10)
-        .setHelpText(
-            "Multiply voxel values in the A grid by a scalar\n"
-            "before combining the A grid with the B grid."));
+        .setTooltip(
+            "Multiply voxel values in the A VDB by a scalar\n"
+            "before combining the A VDB with the B VDB."));
 
     // Scalar multiplier on the B grid
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "mult_b", "B Multiplier")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "bmult", "B Multiplier")
         .setDefault(PRMoneDefaults)
         .setRange(PRM_RANGE_UI, -10, PRM_RANGE_UI, 10)
-        .setHelpText(
-            "Multiply voxel values in the B grid by a scalar\n"
-            "before combining the A grid with the B grid."));
+        .setTooltip(
+            "Multiply voxel values in the B VDB by a scalar\n"
+            "before combining the A VDB with the B VDB."));
 
     // Menu of resampling options
     parms.add(hutil::ParmFactory(PRM_ORD, "resample", "Resample")
         .setDefault(PRMoneDefaults)
-        .setChoiceListItems(PRM_CHOICELIST_SINGLE, SOP_OpenVDB_Combine::sResampleModeMenuItems)
-        .setHelpText(
-            "If the A and B grids have different transforms, one grid should\n"
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, sResampleModeMenuItems)
+        .setTooltip(
+            "If the A and B VDBs have different transforms, one VDB should\n"
             "be resampled to match the other before the two are combined.\n"
-            "Also, level set grids should have matching background values.\n"));
-    {
-        // Menu of resampling interpolation order options
-        const char* items[] = {
+            "Also, level set VDBs should have matching background values\n"
+            "(i.e., matching narrow band widths)."));
+
+    // Menu of resampling interpolation order options
+    parms.add(hutil::ParmFactory(PRM_ORD, "resampleinterp", "Interpolation")
+        .setDefault(PRMoneDefaults)
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
             "point",     "Nearest",
             "linear",    "Linear",
-            "quadratic", "Quadratic",
-            NULL
-        };
-        parms.add(hutil::ParmFactory(PRM_ORD, "resampleinterp", "Interpolation")
-            .setDefault(PRMoneDefaults)
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
-            .setHelpText(
-                "Specify the type of interpolation to be used when\n"
-                "resampling one grid to match the other's transform."));
-    }
+            "quadratic", "Quadratic"
+        })
+        .setTooltip(
+            "Specify the type of interpolation to be used when\n"
+            "resampling one VDB to match the other's transform.")
+        .setDocumentation(
+            "The type of interpolation to be used when resampling one VDB"
+            " to match the other's transform\n\n"
+            "Nearest neighbor interpolation is fast but can introduce noticeable"
+            " sampling artifacts.  Quadratic interpolation is slow but high-quality."
+            " Linear interpolation is intermediate in speed and quality."));
 
     // Deactivate background value toggle
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "deactivate", "Deactivate Background Voxels")
         .setDefault(PRMzeroDefaults)
-        .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
+        .setTypeExtended(PRM_TYPE_TOGGLE_JOIN)
+        .setDocumentation(
+            "Deactivate active output voxels whose values equal"
+            " the output VDB's background value."));
 
     // Deactivation tolerance slider
     parms.add(hutil::ParmFactory(PRM_FLT_J, "bgtolerance", "Deactivate Tolerance")
         .setDefault(PRMzeroDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 1)
-        .setHelpText(
+        .setTooltip(
             "Deactivate active output voxels whose values\n"
-            "equal the output grid's background value.\n"
+            "equal the output VDB's background value.\n"
             "Voxel values are considered equal if they differ\n"
-            "by less than the specified tolerance."));
+            "by less than the specified tolerance.")
+        .setDocumentation(
+            "When deactivation of background voxels is enabled,"
+            " voxel values are considered equal to the background"
+            " if they differ by less than this tolerance."));
 
     // Prune toggle
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "prune", "Prune")
         .setDefault(PRMoneDefaults)
-        .setTypeExtended(PRM_TYPE_TOGGLE_JOIN));
+        .setTypeExtended(PRM_TYPE_TOGGLE_JOIN)
+        .setDocumentation(
+            "Reduce the memory footprint of output VDBs that have"
+            " (sufficiently large) regions of voxels with the same value.\n\n"
+            "NOTE:\n"
+            "    Pruning affects only the memory usage of a VDB.\n"
+            "    It does not remove voxels, apart from inactive voxels\n"
+            "    whose value is equal to the background."));
 
     // Pruning tolerance slider
     parms.add(hutil::ParmFactory(PRM_FLT_J, "tolerance", "Prune Tolerance")
         .setDefault(PRMzeroDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 1)
-        .setHelpText(
-            "Collapse regions of constant value in output grids.\n"
+        .setTooltip(
+            "Collapse regions of constant value in output VDBs.\n"
             "Voxel values are considered equal if they differ\n"
-            "by less than the specified tolerance."));
+            "by less than the specified tolerance.")
+        .setDocumentation(
+            "When pruning is enabled, voxel values are considered equal"
+            " if they differ by less than the specified tolerance."));
 
     // Flood fill toggle
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "flood", "Signed-Flood-Fill Output SDFs")
         .setDefault(PRMzeroDefaults)
-        .setHelpText(
-            "Reclassify inactive voxels of level set grids as either inside or outside."));
+        .setTooltip(
+            "Reclassify inactive voxels of level set VDBs as either inside or outside.")
+        .setDocumentation(
+            "Test inactive voxels to determine if they are inside or outside of an SDF"
+            " and hence whether they should have negative or positive sign."));
+
 
     // Obsolete parameters
     hutil::ParmList obsoleteParms;
@@ -288,15 +476,42 @@ newSopOperator(OP_OperatorTable* table)
         .setDefault(-2));
     obsoleteParms.add(hutil::ParmFactory(PRM_SEPARATOR, "sep1", ""));
     obsoleteParms.add(hutil::ParmFactory(PRM_SEPARATOR, "sep2", ""));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "flatten", "Flatten All B into A")
+        .setDefault(PRMzeroDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_TOGGLE, "pairs", "Combine A/B Pairs")
+        .setDefault(PRMoneDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "groupA", "Group A"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "groupB", "Group B"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "mult_a", "A Multiplier")
+        .setDefault(PRMoneDefaults));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "mult_b", "B Multiplier")
+        .setDefault(PRMoneDefaults));
 
 
     // Register SOP
     hvdb::OpenVDBOpFactory("OpenVDB Combine", SOP_OpenVDB_Combine::factory, parms, *table)
-        .addAlias("OpenVDB Composite")
-        .addAlias("OpenVDB CSG")
-        .setObsoleteParms(obsoleteParms)
         .addInput("A VDBs")
-        .addOptionalInput("B VDBs");
+        .addOptionalInput("B VDBs")
+        .setObsoleteParms(obsoleteParms)
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Combine::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Combine the values of VDB volumes in various ways.\"\"\"\n\
+\n\
+@related\n\
+\n\
+- [Node:sop/vdbcombine]\n\
+- [Node:sop/volumevop]\n\
+- [Node:sop/volumemix]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -311,13 +526,8 @@ SOP_OpenVDB_Combine::factory(OP_Network* net,
 }
 
 
-SOP_OpenVDB_Combine::SOP_OpenVDB_Combine(
-    OP_Network* net, const char* name, OP_Operator* op)
+SOP_OpenVDB_Combine::SOP_OpenVDB_Combine(OP_Network* net, const char* name, OP_Operator* op)
     : SOP_NodeVDB(net, name, op)
-    , mTime(0.0)
-    , mWasCompositeSOP(UT_String(name).fcontain("Composite"))
-        // if this SOP's name contains "Composite", assume that it was formerly
-        // a DW_OpenVDBComposite SOP and not a DW_OpenVDBCSG SOP
 {
 }
 
@@ -330,23 +540,39 @@ SOP_OpenVDB_Combine::resolveObsoleteParms(PRM_ParmList* obsoleteParms)
 {
     if (!obsoleteParms) return;
 
-    PRM_Parm* parm = obsoleteParms->getParmPtr("combination");
-    if (parm && (!parm->isFactoryDefault() || !mWasCompositeSOP)) {
-        // The "combination" choices (union, intersection, difference) from
-        // the old CSG SOP were appended to this SOP's "operation" list.
-        switch (obsoleteParms->evalInt("combination", 0, /*time=*/0.0)) {
-            case 0: setInt("operation", 0, 0.0, OP_UNION); break;
-            case 1: setInt("operation", 0, 0.0, OP_INTERSECTION); break;
-            case 2: setInt("operation", 0, 0.0, OP_DIFFERENCE); break;
+    const fpreal time = 0.0;
+
+    if (PRM_Parm* parm = obsoleteParms->getParmPtr("combination")) {
+        if (!parm->isFactoryDefault()) {
+            // The "combination" choices (union, intersection, difference) from
+            // the old CSG SOP were appended to this SOP's "operation" list.
+            switch (obsoleteParms->evalInt("combination", 0, time)) {
+                case 0: setInt("operation", 0, 0.0, OP_UNION); break;
+                case 1: setInt("operation", 0, 0.0, OP_INTERSECTION); break;
+                case 2: setInt("operation", 0, 0.0, OP_DIFFERENCE); break;
+            }
         }
     }
+    {
+        PRM_Parm
+            *flatten = obsoleteParms->getParmPtr("flatten"),
+            *pairs = obsoleteParms->getParmPtr("pairs");
+        if (flatten && !flatten->isFactoryDefault()) { // factory default was Off
+            setString("flattenbtoa", CH_STRING_LITERAL, "collation", 0, time);
+        } else if (pairs && !pairs->isFactoryDefault()) { // factory default was On
+            setString("awithfirstb", CH_STRING_LITERAL, "collation", 0, time);
+        }
+    }
+
+    resolveRenamedParm(*obsoleteParms, "groupA", "agroup");
+    resolveRenamedParm(*obsoleteParms, "groupB", "bgroup");
+    resolveRenamedParm(*obsoleteParms, "mult_a", "amult");
+    resolveRenamedParm(*obsoleteParms, "mult_b", "bmult");
 
     // Delegate to the base class.
     hvdb::SOP_NodeVDB::resolveObsoleteParms(obsoleteParms);
 }
 
-
-////////////////////////////////////////
 
 // Enable or disable parameters in the UI.
 bool
@@ -357,7 +583,6 @@ SOP_OpenVDB_Combine::updateParmsFlags()
     changed |= enableParm("resampleinterp", evalInt("resample", 0, 0) != 0);
     changed |= enableParm("bgtolerance", evalInt("deactivate", 0, 0) != 0);
     changed |= enableParm("tolerance", evalInt("prune", 0, 0) != 0);
-    changed |= enableParm("pairs", evalInt("flatten", 0, 0) == 0);
 
     return changed;
 }
@@ -366,105 +591,243 @@ SOP_OpenVDB_Combine::updateParmsFlags()
 ////////////////////////////////////////
 
 
+namespace {
+
+using StringVec = std::vector<std::string>;
+
+// Split a string into group patterns separated by whitespace.
+// For example, given '@name=d* @id="1 2" {grp1 grp2}', return
+// ['@name=d*', '@id="1 2"', '{grp1 grp2}'].
+// (This is nonstandard.  Normally, multiple patterns are unioned
+// to define a single group.)
+// Nesting of quotes and braces is not supported.
+inline StringVec
+splitPatterns(const std::string& str)
+{
+    StringVec patterns;
+    bool quoted = false, braced = false;
+    std::string pattern;
+    for (const auto c: str) {
+        if (isspace(c)) {
+            if (pattern.empty()) continue; // skip whitespace between patterns
+            if (quoted || braced) {
+                pattern.push_back(c); // keep whitespace within quotes or braces
+            } else {
+                // At the end of a pattern.  Start a new pattern.
+                patterns.push_back(pattern);
+                pattern.clear();
+                quoted = braced = false;
+            }
+        } else {
+            switch (c) {
+                case '"': quoted = !quoted; break;
+                case '{': braced = true; break;
+                case '}': braced = false; break;
+                default: break;
+            }
+            pattern.push_back(c);
+        }
+    }
+    if (!pattern.empty()) { patterns.push_back(pattern); } // add the final pattern
+
+    // If no patterns were found, add an empty pattern, which matches everything.
+    if (patterns.empty()) { patterns.push_back(""); }
+
+    return patterns;
+}
+
+
+inline UT_String
+getGridName(const GU_PrimVDB* vdb, const UT_String& defaultName = "")
+{
+    UT_String name{UT_String::ALWAYS_DEEP};
+    if (vdb != nullptr) {
+        name = vdb->getGridName();
+        if (!name.isstring()) name = defaultName;
+    }
+    return name;
+}
+
+} // anonymous namespace
+
+
 OP_ERROR
-SOP_OpenVDB_Combine::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Combine)::cookVDBSop(OP_Context& context)
 {
     try {
-        hutil::ScopedInputLock lock(*this, context);
+#if !VDB_COMPILABLE_SOP
+        hutil::ScopedInputLock lock{*this, context};
 
         duplicateSource(0, context);
+#endif
+
+        UT_AutoInterrupt progress{"Combining VDBs"};
 
         mTime = context.getTime();
 
-        const bool pairs = evalInt("pairs", /*idx=*/0, getTime());
-        const bool flatten = evalInt("flatten", /*idx=*/0, getTime());
-        const Operation op = asOp(evalInt("operation", 0, getTime()));
-        const bool needA = needAGrid(op), needB = needBGrid(op);
+        const Operation op = asOp(static_cast<int>(evalInt("operation", 0, getTime())));
         const ResampleMode resample = asResampleMode(evalInt("resample", 0, getTime()));
+        const CollationMode collation = asCollation(evalStdString("collation", getTime()));
+
+        const bool
+            flattenA = ((collation == COLL_FLATTEN_A) || (collation == COLL_FLATTEN_A_GROUPS)),
+            flatten = (flattenA || (collation == COLL_FLATTEN_B_TO_A)),
+            needA = needAGrid(op),
+            needB = (needBGrid(op) && !flattenA);
 
         GU_Detail* aGdp = gdp;
         const GU_Detail* bGdp = inputGeo(1, context);
 
-        UT_String aGroupStr, bGroupStr;
-        evalString(aGroupStr, "groupA", 0, getTime());
-        evalString(bGroupStr, "groupB", 0, getTime());
+        const auto aGroupStr = evalStdString("agroup", getTime());
+        const auto bGroupStr = evalStdString("bgroup", getTime());
 
-        const GA_PrimitiveGroup
-            *aGroup = matchGroup(*aGdp, aGroupStr.toStdString()),
-            *bGroup = (!bGdp ? NULL : matchGroup(const_cast<GU_Detail&>(*bGdp),
-                bGroupStr.toStdString()));
+        const auto* bGroup = (!bGdp ?  nullptr : matchGroup(*bGdp, bGroupStr));
 
-        UT_AutoInterrupt progress("Combining VDB grids");
-
-        // Iterate over A and, optionally, B grids.
-        hvdb::VdbPrimIterator aIt(aGdp, GA_Range::safedeletions(), aGroup);
-        hvdb::VdbPrimCIterator bIt(bGdp, bGroup);
-        for ( ; (!needA || aIt) && (!needB || bIt); ++aIt, ((needB && pairs) ? ++bIt : bIt))
-        {
-            if (progress.wasInterrupted()) {
-                throw std::runtime_error("was interrupted");
+        // In Flatten A Groups mode, treat space-separated subpatterns
+        // as specifying distinct groups to be processed independently.
+        // (In all other modes, subpatterns are unioned into a single group.)
+        std::vector<const GA_PrimitiveGroup*> aGroupVec;
+        if (collation != COLL_FLATTEN_A_GROUPS) {
+            aGroupVec.push_back(matchGroup(*aGdp, aGroupStr));
+        } else {
+            for (const auto& pattern: splitPatterns(aGroupStr)) {
+                aGroupVec.push_back(matchGroup(*aGdp, pattern));
             }
-
-            // Note: even if needA is false, we still need to delete A grids.
-            GU_PrimVDB* aVdb = aIt ? *aIt : NULL;
-
-            const GU_PrimVDB* bVdb = bIt ? *bIt : NULL;
-            hvdb::GridPtr aGrid;
-            hvdb::GridCPtr bGrid;
-
-            if (aVdb) aGrid = aVdb->getGridPtr();
-            if (bVdb) bGrid = bVdb->getConstGridPtr();
-
-            // For error reporting, get the names of the A and B grids.
-            UT_String aGridName = aIt.getPrimitiveName(/*default=*/"A");
-            UT_String bGridName = bIt.getPrimitiveName(/*default=*/"B");
-
-            // Name the output grid after the A grid, except (see below) if the A grid is unused.
-            UT_String outGridName = aIt.getPrimitiveName();
-
-            hvdb::GridPtr outGrid;
-
-            while (true) {
-                // If the A grid is unused, name the output grid after the most recent B grid.
-                if (!needA) outGridName = bIt.getPrimitiveName();
-
-                outGrid = combineGrids(op, aGrid, bGrid, aGridName, bGridName, resample);
-
-                // When not flattening, quit after one pass.
-                if (!flatten) break;
-
-                // See if we have any more B grids.
-                ++bIt;
-                if (!bIt) break;
-
-                bVdb = *bIt;
-                bGrid = bVdb->getConstGridPtr();
-                bGridName = bIt.getPrimitiveName(/*default=*/"B");
-
-                aGrid = outGrid;
-                if (!aGrid) break;
-            }
-
-            if (outGrid) {
-                // Add a new VDB primitive for the output grid to the output gdp.
-                GU_PrimVDB::buildFromGrid(*gdp, outGrid,
-                    /*copyAttrsFrom=*/needA ? aVdb : bVdb, outGridName);
-
-                // Remove the A grid from the output gdp.
-                if (aVdb) gdp->destroyPrimitive(*aVdb, /*andPoints=*/true);
-            }
-
-            if (!needA && !pairs) break;
-            if (flatten) break;
         }
 
-        // In non-paired mode, there should be only one B grid.
-        if (!pairs && !flatten) ++bIt;
+        // For diagnostic purposes, keep track of whether any input grids are left unused.
+        bool unusedA = false, unusedB = false;
 
-        // In flatten mode there should be a single A grid.
-        if (flatten) ++aIt;
+        // Iterate over one or more A groups.
+        for (const auto* aGroup: aGroupVec) {
+            hvdb::VdbPrimIterator aIt{aGdp, GA_Range::safedeletions{}, aGroup};
+            hvdb::VdbPrimCIterator bIt{bGdp, bGroup};
 
-        const bool unusedA = (needA && aIt), unusedB = (needB && bIt);
+            // Populate two vectors of primitives, one comprising the A grids
+            // and the other the B grids.  (In the case of flattening operations,
+            // these grids might be taken from the same input.)
+            // Note: the following relies on exhausted iterators returning nullptr
+            // and on incrementing an exhausted iterator being a no-op.
+            std::vector<GU_PrimVDB*> aVdbVec;
+            std::vector<const GU_PrimVDB*> bVdbVec;
+            switch (collation) {
+                case COLL_PAIRS:
+                    for ( ; (!needA || aIt) && (!needB || bIt); ++aIt, ++bIt) {
+                        aVdbVec.push_back(*aIt);
+                        bVdbVec.push_back(*bIt);
+                    }
+                    unusedA = unusedA || (needA && bool(aIt));
+                    unusedB = unusedB || (needB && bool(bIt));
+                    break;
+                case COLL_A_WITH_1ST_B:
+                    for ( ; aIt && (!needB || bIt); ++aIt) {
+                        aVdbVec.push_back(*aIt);
+                        bVdbVec.push_back(*bIt);
+                    }
+                    break;
+                case COLL_FLATTEN_B_TO_A:
+                    aVdbVec.push_back(*aIt);
+                    bVdbVec.push_back(*bIt);
+                    for (++bIt; bIt; ++bIt) {
+                        aVdbVec.push_back(nullptr);
+                        bVdbVec.push_back(*bIt);
+                    }
+                    break;
+                case COLL_FLATTEN_A:
+                case COLL_FLATTEN_A_GROUPS:
+                    aVdbVec.push_back(*aIt);
+                    for (++aIt; aIt; ++aIt) { bVdbVec.push_back(*aIt); }
+                    break;
+            }
+            if ((needA && aVdbVec.empty()) || (needB && bVdbVec.empty())) continue;
+
+            std::set<GU_PrimVDB*> vdbsToRemove;
+
+            // Combine grids.
+            if (!flatten) {
+                // Iterate over A and, optionally, B grids.
+                for (size_t i = 0, N = std::min(aVdbVec.size(), bVdbVec.size()); i < N; ++i) {
+                    if (progress.wasInterrupted()) { throw std::runtime_error{"interrupted"}; }
+
+                    // Note: even if needA is false, we still need to delete A grids.
+                    GU_PrimVDB* aVdb = aVdbVec[i];
+                    const GU_PrimVDB* bVdb = bVdbVec[i];
+
+                    hvdb::GridPtr aGrid;
+                    hvdb::GridCPtr bGrid;
+                    if (aVdb) aGrid = aVdb->getGridPtr();
+                    if (bVdb) bGrid = bVdb->getConstGridPtr();
+
+                    // For error reporting, get the names of the A and B grids.
+                    const UT_String
+                        aGridName = getGridName(aVdb, /*default=*/"A"),
+                        bGridName = getGridName(bVdb, /*default=*/"B");
+
+                    if (hvdb::GridPtr outGrid =
+                        combineGrids(op, aGrid, bGrid, aGridName, bGridName, resample))
+                    {
+                        // Name the output grid after the A grid if the A grid is used,
+                        // or after the B grid otherwise.
+                        UT_String outGridName = needA ? getGridName(aVdb) : getGridName(bVdb);
+                        // Add a new VDB primitive for the output grid to the output gdp.
+                        GU_PrimVDB::buildFromGrid(*gdp, outGrid,
+                            /*copyAttrsFrom=*/needA ? aVdb : bVdb, outGridName);
+                        vdbsToRemove.insert(aVdb);
+                    }
+                }
+
+            // Flatten grids (i.e., combine all B grids into the first A grid).
+            } else {
+                GU_PrimVDB* aVdb = aVdbVec[0];
+                hvdb::GridPtr aGrid;
+                if (aVdb) aGrid = aVdb->getGridPtr();
+
+                hvdb::GridPtr outGrid;
+                UT_String outGridName;
+
+                // Iterate over B grids.
+                const GU_PrimVDB* bVdb = nullptr;
+                for (const GU_PrimVDB* theBVdb: bVdbVec) {
+                    if (progress.wasInterrupted()) { throw std::runtime_error{"interrupted"}; }
+
+                    bVdb = theBVdb;
+
+                    hvdb::GridCPtr bGrid;
+                    if (bVdb) {
+                        bGrid = bVdb->getConstGridPtr();
+                        if (flattenA) {
+                            // When flattening within the A group, remove B grids,
+                            // since they're actually copies of grids from input 0.
+                            vdbsToRemove.insert(const_cast<GU_PrimVDB*>(bVdb));
+                        }
+                    }
+
+                    const UT_String
+                        aGridName = getGridName(aVdb, /*default=*/"A"),
+                        bGridName = getGridName(bVdb, /*default=*/"B");
+
+                    // Name the output grid after the A grid if the A grid is used,
+                    // or after the B grid otherwise.
+                    outGridName = (needA ? getGridName(aVdb) : getGridName(bVdb));
+
+                    outGrid = combineGrids(op, aGrid, bGrid, aGridName, bGridName, resample);
+
+                    aGrid = outGrid;
+                }
+                if (outGrid) {
+                    // Add a new VDB primitive for the output grid to the output gdp.
+                    GU_PrimVDB::buildFromGrid(*gdp, outGrid,
+                        /*copyAttrsFrom=*/needA ? aVdb : bVdb, outGridName);
+                    vdbsToRemove.insert(aVdb);
+                }
+            }
+
+            // Remove primitives that were copied from input 0.
+            for (GU_PrimVDB* vdb: vdbsToRemove) {
+                gdp->destroyPrimitive(*vdb, /*andPoints=*/true);
+            }
+        } // for each A group
+
         if (unusedA || unusedB) {
             std::ostringstream ostr;
             ostr << "some grids were not processed because there were more "
@@ -489,8 +852,8 @@ namespace {
 template<typename GridT>
 struct MulAdd
 {
-    typedef typename GridT::ValueType ValueT;
-    typedef typename GridT::Ptr GridPtrT;
+    using ValueT = typename GridT::ValueType;
+    using GridPtrT = typename GridT::Ptr;
 
     float scale, offset;
 
@@ -515,7 +878,7 @@ struct MulAdd
             if (!dest) dest = GridT::create(src); // same transform, new tree
             ValueT bg;
             (*this)(src.background(), ValueT(), bg);
-            dest->setBackground(bg);
+            openvdb::tools::changeBackground(dest->tree(), bg);
             dest->tree().combine2(src.tree(), src.tree(), *this, /*prune=*/false);
         }
     }
@@ -574,8 +937,8 @@ struct ApproxEq
 template<typename T>
 struct ApproxEq<openvdb::math::Vec2<T> >
 {
-    typedef openvdb::math::Vec2<T> VecT;
-    typedef typename VecT::value_type ValueT;
+    using VecT = openvdb::math::Vec2<T>;
+    using ValueT = typename VecT::value_type;
     const VecT &a, &b;
     ApproxEq(const VecT& _a, const VecT& _b): a(_a), b(_b) {}
     operator bool() const { return a.eq(b, /*abs=*/ValueT(1e-8f)); }
@@ -586,8 +949,8 @@ struct ApproxEq<openvdb::math::Vec2<T> >
 template<typename T>
 struct ApproxEq<openvdb::math::Vec3<T> >
 {
-    typedef openvdb::math::Vec3<T> VecT;
-    typedef typename VecT::value_type ValueT;
+    using VecT = openvdb::math::Vec3<T>;
+    using ValueT = typename VecT::value_type;
     const VecT &a, &b;
     ApproxEq(const VecT& _a, const VecT& _b): a(_a), b(_b) {}
     operator bool() const { return a.eq(b, /*abs=*/ValueT(1e-8f)); }
@@ -598,8 +961,8 @@ struct ApproxEq<openvdb::math::Vec3<T> >
 template<typename T>
 struct ApproxEq<openvdb::math::Vec4<T> >
 {
-    typedef openvdb::math::Vec4<T> VecT;
-    typedef typename VecT::value_type ValueT;
+    using VecT = openvdb::math::Vec4<T>;
+    using ValueT = typename VecT::value_type;
     const VecT &a, &b;
     ApproxEq(const VecT& _a, const VecT& _b): a(_a), b(_b) {}
     operator bool() const { return a.eq(b, /*abs=*/ValueT(1e-8f)); }
@@ -625,7 +988,11 @@ struct SOP_OpenVDB_Combine::DispatchOp
 // Helper class for use with UTvdbProcessTypedGrid()
 struct SOP_OpenVDB_Combine::CombineOp
 {
+#if VDB_COMPILABLE_SOP
+    SOP_OpenVDB_Combine::Cache* self;
+#else
     SOP_OpenVDB_Combine* self;
+#endif
     Operation op;
     ResampleMode resample;
     UT_String aGridName, bGridName;
@@ -633,7 +1000,7 @@ struct SOP_OpenVDB_Combine::CombineOp
     hvdb::GridPtr outGrid;
     hvdb::Interrupter interrupt;
 
-    CombineOp(): self(NULL) {}
+    CombineOp(): self(nullptr) {}
 
     // Functor for use with UTvdbProcessTypedGridScalar() to return
     // a scalar grid's background value as a floating-point quantity
@@ -654,7 +1021,7 @@ struct SOP_OpenVDB_Combine::CombineOp
     template<typename GridT>
     typename GridT::Ptr resampleToMatch(const GridT& src, const hvdb::Grid& ref, int order)
     {
-        typedef typename GridT::ValueType ValueT;
+        using ValueT = typename GridT::ValueType;
         const ValueT ZERO = openvdb::zeroVal<ValueT>();
 
         const openvdb::math::Transform& refXform = ref.constTransform();
@@ -666,6 +1033,15 @@ struct SOP_OpenVDB_Combine::CombineOp
             const ValueT halfWidth = ((ref.getGridClass() == openvdb::GRID_LEVEL_SET)
                 ? ValueT(ZERO + this->getScalarBackgroundValue(ref) * (1.0 / ref.voxelSize()[0]))
                 : ValueT(src.background() * (1.0 / src.voxelSize()[0])));
+
+            if (!openvdb::math::isFinite(halfWidth)) {
+                std::stringstream msg;
+                msg << "Resample to match: Illegal narrow band width = " << halfWidth
+                    << ", caused by grid '" << src.getName() << "' with background "
+                    << this->getScalarBackgroundValue(ref);
+                throw std::invalid_argument(msg.str());
+            }
+
             try {
                 dest = openvdb::tools::doLevelSetRebuild(src, /*iso=*/ZERO,
                     /*exWidth=*/halfWidth, /*inWidth=*/halfWidth, &refXform, &interrupt);
@@ -679,7 +1055,11 @@ struct SOP_OpenVDB_Combine::CombineOp
             // For non-level set grids or if level set rebuild failed due to an unsupported
             // grid type, use the grid transformer tool to resample the source grid to match
             // the reference grid.
+#if OPENVDB_ABI_VERSION_NUMBER <= 3
             dest = src.copy(openvdb::CP_NEW);
+#else
+            dest = src.copyWithNewTree();
+#endif
             dest->setTransform(refXform.copy());
             using namespace openvdb;
             switch (order) {
@@ -700,10 +1080,11 @@ struct SOP_OpenVDB_Combine::CombineOp
         if (!aGrid || !bGrid) return;
 
         const bool
-            needA = self->needAGrid(op),
-            needB = self->needBGrid(op),
+            needA = needAGrid(op),
+            needB = needBGrid(op),
             needBoth = needA && needB;
-        const int samplingOrder = self->evalInt("resampleinterp", 0, self->getTime());
+        const int samplingOrder = static_cast<int>(
+            self->evalInt("resampleinterp", 0, self->getTime()));
 
         // One of RESAMPLE_A, RESAMPLE_B or RESAMPLE_OFF, specifying whether
         // grid A, grid B or neither grid was resampled
@@ -785,7 +1166,7 @@ struct SOP_OpenVDB_Combine::CombineOp
 
     void checkVectorTypes(const hvdb::Grid* aGrid, const hvdb::Grid* bGrid)
     {
-        if (!aGrid || !bGrid || !self->needAGrid(op) || !self->needBGrid(op)) return;
+        if (!aGrid || !bGrid || !needAGrid(op) || !needBGrid(op)) return;
 
         switch (op) {
             case OP_TOPO_UNION:
@@ -816,16 +1197,16 @@ struct SOP_OpenVDB_Combine::CombineOp
     template<typename GridT>
     void combineSameType()
     {
-        typedef typename GridT::ValueType ValueT;
+        using ValueT = typename GridT::ValueType;
 
         const bool
-            needA = self->needAGrid(op),
-            needB = self->needBGrid(op);
+            needA = needAGrid(op),
+            needB = needBGrid(op);
         const float
-            aMult = self->evalFloat("mult_a", 0, self->getTime()),
-            bMult = self->evalFloat("mult_b", 0, self->getTime());
+            aMult = float(self->evalFloat("amult", 0, self->getTime())),
+            bMult = float(self->evalFloat("bmult", 0, self->getTime()));
 
-        const GridT *aGrid = NULL, *bGrid = NULL;
+        const GridT *aGrid = nullptr, *bGrid = nullptr;
         if (aBaseGrid) aGrid = UTvdbGridCast<GridT>(aBaseGrid).get();
         if (bBaseGrid) bGrid = UTvdbGridCast<GridT>(bBaseGrid).get();
         if (needA && !aGrid) throw std::runtime_error("missing A grid");
@@ -900,8 +1281,12 @@ struct SOP_OpenVDB_Combine::CombineOp
                 const Blend1<ValueT> comp(aMult, bMult);
                 ValueT bg;
                 comp(aGrid->background(), ZERO, bg);
+#if OPENVDB_ABI_VERSION_NUMBER <= 3
                 resultGrid = aGrid->copy(/*tree=*/openvdb::CP_NEW);
-                resultGrid->setBackground(bg);
+#else
+                resultGrid = aGrid->copyWithNewTree();
+#endif
+                openvdb::tools::changeBackground(resultGrid->tree(), bg);
                 resultGrid->tree().combine2(aGrid->tree(), bGrid->tree(), comp, /*prune=*/false);
                 break;
             }
@@ -910,8 +1295,12 @@ struct SOP_OpenVDB_Combine::CombineOp
                 const Blend2<ValueT> comp(aMult, bMult);
                 ValueT bg;
                 comp(aGrid->background(), ZERO, bg);
+#if OPENVDB_ABI_VERSION_NUMBER <= 3
                 resultGrid = aGrid->copy(/*tree=*/openvdb::CP_NEW);
-                resultGrid->setBackground(bg);
+#else
+                resultGrid = aGrid->copyWithNewTree();
+#endif
+                openvdb::tools::changeBackground(resultGrid->tree(), bg);
                 resultGrid->tree().combine2(aGrid->tree(), bGrid->tree(), comp, /*prune=*/false);
                 break;
             }
@@ -966,11 +1355,11 @@ struct SOP_OpenVDB_Combine::CombineOp
     void combineDifferentTypes()
     {
         const bool
-            needA = self->needAGrid(op),
-            needB = self->needBGrid(op);
+            needA = needAGrid(op),
+            needB = needBGrid(op);
 
-        const AGridT* aGrid = NULL;
-        const BGridT* bGrid = NULL;
+        const AGridT* aGrid = nullptr;
+        const BGridT* bGrid = nullptr;
         if (aBaseGrid) aGrid = UTvdbGridCast<AGridT>(aBaseGrid).get();
         if (bBaseGrid) bGrid = UTvdbGridCast<BGridT>(bBaseGrid).get();
         if (needA && !aGrid) throw std::runtime_error("missing A grid");
@@ -987,7 +1376,7 @@ struct SOP_OpenVDB_Combine::CombineOp
         // registers with the other grid's.
         if (aGrid && bGrid) this->resampleGrids(aGrid, bGrid);
 
-        const float aMult = self->evalFloat("mult_a", 0, self->getTime());
+        const float aMult = float(self->evalFloat("amult", 0, self->getTime()));
 
         typename AGridT::Ptr resultGrid;
 
@@ -1025,7 +1414,7 @@ struct SOP_OpenVDB_Combine::CombineOp
     template<typename GridT>
     typename GridT::Ptr postprocess(typename GridT::Ptr resultGrid)
     {
-        typedef typename GridT::ValueType ValueT;
+        using ValueT = typename GridT::ValueType;
         const ValueT ZERO = openvdb::zeroVal<ValueT>();
 
         const bool
@@ -1035,7 +1424,7 @@ struct SOP_OpenVDB_Combine::CombineOp
 
         if (deactivate) {
             const float deactivationTolerance =
-                self->evalFloat("bgtolerance", 0, self->getTime());
+                float(self->evalFloat("bgtolerance", 0, self->getTime()));
 
             // Mark active output tiles and voxels as inactive if their
             // values match the output grid's background value.
@@ -1045,11 +1434,11 @@ struct SOP_OpenVDB_Combine::CombineOp
         }
 
         if (flood && resultGrid->getGridClass() == openvdb::GRID_LEVEL_SET) {
-            resultGrid->signedFloodFill();
+            openvdb::tools::signedFloodFill(resultGrid->tree());
         }
         if (prune) {
-            const float tolerance = self->evalFloat("tolerance", 0, self->getTime());
-            resultGrid->tree().prune(ValueT(ZERO + tolerance));
+            const float tolerance = float(self->evalFloat("tolerance", 0, self->getTime()));
+            openvdb::tools::prune(resultGrid->tree(), ValueT(ZERO + tolerance));
         }
 
         return resultGrid;
@@ -1059,8 +1448,8 @@ struct SOP_OpenVDB_Combine::CombineOp
     void operator()(typename AGridT::ConstPtr)
     {
         const bool
-            needA = self->needAGrid(op),
-            needB = self->needBGrid(op),
+            needA = needAGrid(op),
+            needB = needBGrid(op),
             needBoth = needA && needB;
 
         if (!needBoth || !aBaseGrid || !bBaseGrid || aBaseGrid->type() == bBaseGrid->type()) {
@@ -1093,9 +1482,12 @@ SOP_OpenVDB_Combine::DispatchOp<AGridT>::operator()(typename BGridT::ConstPtr)
 
 
 hvdb::GridPtr
-SOP_OpenVDB_Combine::combineGrids(Operation op,
-    hvdb::GridCPtr aGrid, hvdb::GridCPtr bGrid,
-    const UT_String& aGridName, const UT_String& bGridName,
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Combine)::combineGrids(
+    Operation op,
+    hvdb::GridCPtr aGrid,
+    hvdb::GridCPtr bGrid,
+    const UT_String& aGridName,
+    const UT_String& bGridName,
     ResampleMode resample)
 {
     hvdb::GridPtr outGrid;
@@ -1114,7 +1506,7 @@ SOP_OpenVDB_Combine::combineGrids(Operation op,
          (bGrid && bGrid->getGridClass() != openvdb::GRID_LEVEL_SET)))
     {
         std::ostringstream ostr;
-        ostr << "expected level set grids for the " << SOP_OpenVDB_Combine::sOpMenuItems[op*2+1]
+        ostr << "expected level set grids for the " << sOpMenuItems[op*2+1]
             << " operation,\n                 found "
             << hvdb::Grid::gridClassToString(aGrid->getGridClass()) << " (" << aGridName << ") and "
             << hvdb::Grid::gridClassToString(bGrid->getGridClass()) << " (" << bGridName
@@ -1158,6 +1550,6 @@ SOP_OpenVDB_Combine::combineGrids(Operation op,
     return compOp.outGrid;
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -35,8 +35,8 @@
 #include <openvdb_houdini/Utils.h>
 #include <openvdb_houdini/SOP_NodeVDB.h>
 #include <UT/UT_Interrupt.h>
-#include <boost/math/constants/constants.hpp>
 #include <openvdb/tools/LevelSetSphere.h>
+#include <openvdb/tools/LevelSetPlatonic.h>
 #include <openvdb/tools/LevelSetUtil.h>
 
 namespace hvdb = openvdb_houdini;
@@ -47,71 +47,109 @@ class SOP_OpenVDB_Platonic: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Platonic(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Platonic() {};
+    ~SOP_OpenVDB_Platonic() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
+    OP_ERROR cookVDBSop(OP_Context&) override;
+    bool updateParmsFlags() override;
 };
 
 
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
-    { // Shapes
-        const char* items[] = {
-            "sphere", "Sphere", NULL
-        };
-
-        parms.add(hutil::ParmFactory(PRM_ORD, "solidType", "Solid Type")
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items));
-    }
+    // Shapes
+    parms.add(hutil::ParmFactory(PRM_ORD, "solidType", "Solid Type")
+        .setTooltip("Select a sphere or one of the five platonic solids")
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
+            "sphere",       "Sphere",
+            "tetrahedron",  "Tetrahedron",
+            "cube",         "Cube",
+            "octahedron",   "Octahedron",
+            "dodecahedron", "Dodecahedron",
+            "icosahedron",  "Icosahedron"
+        }));
 
     { // Grid Class
-        std::vector<std::string> items;
-        items.push_back(openvdb::GridBase::gridClassToString(openvdb::GRID_LEVEL_SET)); // token
-        items.push_back(openvdb::GridBase::gridClassToMenuName(openvdb::GRID_LEVEL_SET)); // label
-        items.push_back("sdf");
-        items.push_back("Signed Distance Field");
+        const std::vector<std::string> items{
+            openvdb::GridBase::gridClassToString(openvdb::GRID_LEVEL_SET), // token
+            openvdb::GridBase::gridClassToMenuName(openvdb::GRID_LEVEL_SET), // label
+            "sdf", "Signed Distance Field"
+        };
 
         parms.add(hutil::ParmFactory(PRM_STRING, "gridclass", "Grid Class")
             .setDefault(openvdb::GridBase::gridClassToString(openvdb::GRID_LEVEL_SET))
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items));
+            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
+            .setDocumentation("\
+The type of volume to generate\n\
+\n\
+Level Set:\n\
+    Generate a narrow-band signed distance field level set, in which\n\
+    the values define positive and negative distances to the surface\n\
+    of the solid up to a certain band width.\n\
+\n\
+Signed Distance Field:\n\
+    Generate a narrow-band unsigned distance field level set, in which\n\
+    the values define positive distances to the surface of the solid\n\
+    up to a certain band width.\n"));
     }
 
     // Radius
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "scalarRadius", "Radius")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "scalarRadius", "Radius/Size")
         .setDefault(PRMoneDefaults)
-        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_FREE, 10));
+        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_FREE, 10)
+        .setTooltip("The size of the platonic solid or the radius of the sphere"));
 
     // Center
     parms.add(hutil::ParmFactory(PRM_XYZ_J, "center", "Center")
         .setVectorSize(3)
-        .setDefault(PRMzeroDefaults));
+        .setDefault(PRMzeroDefaults)
+        .setTooltip("The world-space center of the level set"));
 
     // Voxel size
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelSize", "Voxel size")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelSize", "Voxel Size")
         .setDefault(0.1f)
-        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_FREE, 10));
+        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_FREE, 10)
+        .setTooltip("The size of a voxel in world units"));
 
     // Narrow-band half-width
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "halfWidth", "Half-band width")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "halfWidth", "Half-Band Width")
         .setDefault(PRMthreeDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 1.0, PRM_RANGE_UI, 10)
-        .setHelpText("Half the width of the narrow band in voxel units. "
-            "(3 is optimal for level set operations.)"));
+        .setTooltip(
+            "Half the width of the narrow band in voxel units\n\n"
+            "For proper operation, many nodes expect this to be at least three."));
 
-    parms.add(hutil::ParmFactory(PRM_TOGGLE, "fogVolume", "Convert to fog volume"));
+    parms.add(hutil::ParmFactory(PRM_TOGGLE, "fogVolume", "Convert to Fog Volume")
+        .setTooltip("If enabled, generate a fog volume instead of a level set"));
 
     // Register this operator.
     hvdb::OpenVDBOpFactory("OpenVDB Platonic",
-        SOP_OpenVDB_Platonic::factory, parms, *table);
+        SOP_OpenVDB_Platonic::factory, parms, *table)
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Generate a platonic solid as a level set or a fog volume VDB.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node generates a VDB representing a platonic solid as either a level set or fog volume.\n\
+\n\
+@related\n\
+- [OpenVDB Create|Node:sop/DW_OpenVDBCreate]\n\
+- [Node:sop/platonic]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -135,12 +173,7 @@ SOP_OpenVDB_Platonic::updateParmsFlags()
 {
     bool changed = false;
 
-    bool sdfGrid = false;
-    {
-        UT_String gridClassStr;
-        evalString(gridClassStr, "gridclass", 0, 0);
-        sdfGrid = (gridClassStr.toStdString() == "sdf");
-    }
+    const bool sdfGrid = (evalStdString("gridclass", 0) == "sdf");
 
     changed |= enableParm("halfWidth", sdfGrid);
 
@@ -149,7 +182,7 @@ SOP_OpenVDB_Platonic::updateParmsFlags()
 
 
 OP_ERROR
-SOP_OpenVDB_Platonic::cookMySop(OP_Context& context)
+SOP_OpenVDB_Platonic::cookVDBSop(OP_Context& context)
 {
     try {
         hutil::ScopedInputLock lock(*this, context);
@@ -157,25 +190,45 @@ SOP_OpenVDB_Platonic::cookMySop(OP_Context& context)
 
         const fpreal time = context.getTime();
 
-        hvdb::Interrupter boss("OpenVDB Platonic");
+        hvdb::Interrupter boss("Creating VDB platonic solid");
 
         // Read GUI parameters and generate narrow-band level set of sphere
-        const float radius = evalFloat("scalarRadius", 0, time);
+        const float radius = static_cast<float>(evalFloat("scalarRadius", 0, time));
         const openvdb::Vec3f center = evalVec3f("center", time);
-        const float voxelSize = evalFloat("voxelSize", 0, time);
-        float halfWidth = evalFloat("halfWidth", 0, time);
+        const float voxelSize = static_cast<float>(evalFloat("voxelSize", 0, time));
+        const float halfWidth = ((evalStdString("gridclass", 0) != "sdf") ?
+            3.0f : static_cast<float>(evalFloat("halfWidth", 0, time)));
 
-        {
-            UT_String gridClassStr;
-            evalString(gridClassStr, "gridclass", 0, 0);
-            if (gridClassStr.toStdString() != "sdf") {
-                halfWidth = 3.0;
-            }
-        }
-
-        openvdb::FloatGrid::Ptr grid =
-            openvdb::tools::createLevelSetSphere<openvdb::FloatGrid, hvdb::Interrupter>
+        openvdb::FloatGrid::Ptr grid;
+        switch (evalInt("solidType", 0, time)) {
+        case 0://Sphere
+            grid = openvdb::tools::createLevelSetSphere<openvdb::FloatGrid, hvdb::Interrupter>
                 (radius, center, voxelSize, halfWidth, &boss);
+            break;
+        case 1:// Tetrahedraon
+            grid = openvdb::tools::createLevelSetTetrahedron<openvdb::FloatGrid, hvdb::Interrupter>
+                (radius, center, voxelSize, halfWidth, &boss);
+            break;
+        case 2:// Cube
+            grid = openvdb::tools::createLevelSetCube<openvdb::FloatGrid, hvdb::Interrupter>
+                (radius, center, voxelSize, halfWidth, &boss);
+            break;
+        case 3:// Octahedron
+            grid = openvdb::tools::createLevelSetOctahedron<openvdb::FloatGrid, hvdb::Interrupter>
+                (radius, center, voxelSize, halfWidth, &boss);
+            break;
+        case 4:// Dodecahedron
+            grid = openvdb::tools::createLevelSetDodecahedron<openvdb::FloatGrid, hvdb::Interrupter>
+                (radius, center, voxelSize, halfWidth, &boss);
+            break;
+        case 5:// Icosahedron
+            grid = openvdb::tools::createLevelSetIcosahedron<openvdb::FloatGrid, hvdb::Interrupter>
+                (radius, center, voxelSize, halfWidth, &boss);
+            break;
+        default:
+            addError(SOP_MESSAGE, "Illegal shape.");
+            return error();
+        }
 
         // Fog volume conversion
         if (bool(evalInt("fogVolume", 0, time))) {
@@ -191,6 +244,6 @@ SOP_OpenVDB_Platonic::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

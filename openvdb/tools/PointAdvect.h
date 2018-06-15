@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -42,11 +42,11 @@
 #include <openvdb/Grid.h>                  // grid
 #include <openvdb/util/NullInterrupter.h>
 #include "Interpolation.h"                 // sampling
-
-#include <boost/static_assert.hpp>
+#include "VelocityFields.h"                // VelocityIntegrator
 #include <tbb/blocked_range.h>             // threading
 #include <tbb/parallel_for.h>              // threading
 #include <tbb/task.h>                      // for cancel
+#include <vector>
 
 
 namespace openvdb {
@@ -61,9 +61,9 @@ template<typename CptGridT = Vec3fGrid>
 class ClosestPointProjector
 {
 public:
-    typedef CptGridT                            CptGridType;
-    typedef typename CptGridType::ConstAccessor CptAccessor;
-    typedef typename CptGridType::ValueType     CptValueType;
+    using CptGridType = CptGridT;
+    using CptAccessor = typename CptGridType::ConstAccessor;
+    using CptValueType = typename CptGridType::ValueType;
 
     ClosestPointProjector():
         mCptIterations(0)
@@ -82,7 +82,7 @@ public:
     {
     }
     void setConstraintIterations(unsigned int cptIterations) { mCptIterations = cptIterations; }
-    unsigned int numIterations() { return mCptIterations;};
+    unsigned int numIterations() { return mCptIterations; }
 
     // point constraint
     template <typename LocationType>
@@ -108,107 +108,6 @@ private:
     unsigned int        mCptIterations;
 };// end of ClosestPointProjector class
 
-
-/// Class to hold a Vec3 field interperated as a velocity field.
-/// Primarily exists to provide a method(s) that integrate a passive
-/// point forward in the velocity field for a single time-step (dt)
-template<typename GridT = Vec3fGrid, bool StaggeredVelocity = false>
-class VelocitySampler
-{
-public:
-    typedef typename GridT::ConstAccessor   VelAccessor;
-    typedef typename GridT::ValueType       VelValueType;
-
-    VelocitySampler(const GridT& velGrid):
-        mVelGrid(&velGrid),
-        mVelAccessor(mVelGrid->getAccessor())
-    {
-    }
-    VelocitySampler(const VelocitySampler& other):
-        mVelGrid(other.mVelGrid),
-        mVelAccessor(mVelGrid->getAccessor())
-    {
-    }
-    ~VelocitySampler()
-    {
-    }
-    /// Samples the velocity at position W onto result. Supports both
-    /// staggered (i.e. MAC) and collocated velocity grids.
-    template <typename LocationType>
-    inline void sample(const LocationType& W, VelValueType& result) const
-    {
-        const Vec3R location = mVelGrid->worldToIndex(Vec3R(W[0], W[1], W[2]));
-        /// Note this if-branch is optimized away at compile time
-        if (StaggeredVelocity) {
-            // the velocity Grid stores data in MAC-style staggered layout
-            StaggeredBoxSampler::sample<VelAccessor>(mVelAccessor, location, result);
-        } else {
-            // the velocity Grid uses collocated data
-            BoxSampler::sample<VelAccessor>(mVelAccessor, location, result);
-        }
-    }
-
-private:
-    // holding the Grids for the transforms
-    const GridT* mVelGrid; // Velocity vector field
-    VelAccessor mVelAccessor;
-};// end of VelocitySampler class
-
-
-/// @brief Performs runge-kutta time integration of variable order in
-/// a static velocity field
-template<typename GridT = Vec3fGrid, bool StaggeredVelocity = false>
-class VelocityIntegrator
-{
-public:
-    typedef typename GridT::ValueType  VecType;
-    typedef typename VecType::ValueType ElementType;
-
-    VelocityIntegrator(const GridT& velGrid):
-        mVelField(velGrid)
-    {
-    }
-    // variable order Runge-Kutta time integration for a single time step
-    template<int Order, typename LocationType>
-    void rungeKutta(const float dt, LocationType& loc) {
-        VecType P(loc[0],loc[1],loc[2]), V0, V1, V2, V3;
-
-        BOOST_STATIC_ASSERT((Order < 5) &&  (Order > -1));
-        /// Note the if-braching below is optimized away at compile time
-        if (Order == 0) {
-            // do nothing
-            return ;
-        } else if (Order == 1) {
-            mVelField.sample(P, V0);
-            P =  dt*V0;
-
-        } else if (Order == 2) {
-            mVelField.sample(P, V0);
-            mVelField.sample(P + ElementType(0.5) * ElementType(dt) * V0, V1);
-            P = dt*V1;
-
-        } else if (Order == 3) {
-            mVelField.sample(P, V0);
-            mVelField.sample(P+ElementType(0.5)*ElementType(dt)*V0, V1);
-            mVelField.sample(P+dt*(ElementType(2.0)*V1-V0), V2);
-            P = dt*(V0 + ElementType(4.0)*V1 + V2)*ElementType(1.0/6.0);
-
-        } else if (Order == 4) {
-            mVelField.sample(P, V0);
-            mVelField.sample(P+ElementType(0.5)*ElementType(dt)*V0, V1);
-            mVelField.sample(P+ElementType(0.5)*ElementType(dt)*V1, V2);
-            mVelField.sample(P+     dt*V2, V3);
-            P = dt*(V0 + ElementType(2.0)*(V1 + V2) + V3)*ElementType(1.0/6.0);
-
-        }
-        loc += LocationType(P[0], P[1], P[2]);
-
-    }
-private:
-    VelocitySampler<GridT, StaggeredVelocity> mVelField;
-};// end of VelocityIntegrator class
-
-
 ////////////////////////////////////////
 
 
@@ -224,7 +123,7 @@ private:
 /// class PointList {
 ///     ...
 /// public:
-///     typedef internal_vector3_type value_type; // must support [] component access
+///     using value_type = internal_vector3_type; // must support [] component access
 ///     openvdb::Index size() const;              // number of points in list
 ///     value_type& operator[](int n);            // world space position of nth point
 /// };
@@ -240,14 +139,14 @@ template<typename GridT = Vec3fGrid,
 class PointAdvect
 {
 public:
-    typedef GridT                                        GridType;
-    typedef PointListT                                   PointListType;
-    typedef typename PointListT::value_type              LocationType;
-    typedef VelocityIntegrator<GridT, StaggeredVelocity> VelocityFieldIntegrator;
+    using GridType = GridT;
+    using PointListType = PointListT;
+    using LocationType = typename PointListT::value_type;
+    using VelocityFieldIntegrator = VelocityIntegrator<GridT, StaggeredVelocity>;
 
-    PointAdvect(const GridT& velGrid, InterrupterType* interrupter=NULL) :
+    PointAdvect(const GridT& velGrid, InterrupterType* interrupter = nullptr):
         mVelGrid(&velGrid),
-        mPoints(NULL),
+        mPoints(nullptr),
         mIntegrationOrder(1),
         mThreaded(true),
         mInterrupter(interrupter)
@@ -373,14 +272,14 @@ template<typename GridT = Vec3fGrid,
 class ConstrainedPointAdvect
 {
 public:
-    typedef GridT                                        GridType;
-    typedef typename PointListT::value_type              LocationType;
-    typedef VelocityIntegrator<GridT, StaggeredVelocity> VelocityIntegratorType;
-    typedef ClosestPointProjector<CptGridType>           ClosestPointProjectorType;
-    typedef PointListT PointListType;
+    using GridType = GridT;
+    using LocationType = typename PointListT::value_type;
+    using VelocityIntegratorType = VelocityIntegrator<GridT, StaggeredVelocity>;
+    using ClosestPointProjectorType = ClosestPointProjector<CptGridType>;
+    using PointListType = PointListT;
 
     ConstrainedPointAdvect(const GridType& velGrid,
-        const GridType& cptGrid, int cptn, InterrupterType* interrupter = NULL):
+        const GridType& cptGrid, int cptn, InterrupterType* interrupter = nullptr):
         mVelGrid(&velGrid),
         mCptGrid(&cptGrid),
         mCptIter(cptn),
@@ -419,7 +318,7 @@ public:
         (mIntegrationOrder>0) ? mAdvIterations = advIterations : mAdvIterations = 1;
 
         if (mInterrupter) mInterrupter->start("Advecting points by OpenVDB velocity field: ");
-        const int N = mPoints->size();
+        const size_t N = mPoints->size();
 
         if (mThreaded) {
             tbb::parallel_for(tbb::blocked_range<size_t>(0, N), *this);
@@ -519,6 +418,6 @@ private:
 
 #endif // OPENVDB_TOOLS_POINT_ADVECT_HAS_BEEN_INCLUDED
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

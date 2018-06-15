@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -53,6 +53,7 @@
 #include <GT/GT_GEOPrimitive.h>
 #include <GT/GT_Handles.h>
 #include <GT/GT_PrimCurveMesh.h>
+#include <GU/GU_DetailHandle.h>
 
 #include "GEO_PrimVDB.h"
 #include <UT/UT_ParallelUtil.h>
@@ -142,11 +143,10 @@ public:
 
     template <typename GridT>
     void
-    processGrid(const GridT &grid, int dummy)
+    processGrid(const GridT &grid, int /*dummy*/)
     {
 	using namespace openvdb;
-        typedef typename GridT::TreeType TreeT;
-        typedef typename GridT::ConstPtr GridConstPtrT;
+	typedef typename GridT::TreeType TreeT;
 	typedef typename TreeT::LeafCIter LeafCIter;
 	typedef typename TreeT::LeafNodeType LeafNodeType;
 
@@ -275,9 +275,9 @@ GT_GEOPrimCollectVDB::beginCollecting(
 
 GT_PrimitiveHandle
 GT_GEOPrimCollectVDB::collect(
-	const GT_GEODetailListHandle &geometry,
+	const GT_GEODetailListHandle &/*geometry*/,
 	const GEO_Primitive *const* prim_list,
-	int nsegments,
+	int /*nsegments*/,
 	GT_GEOPrimCollectData *data) const
 {
     data->asPointer<GT_GEOPrimCollectOffsets>()->append(prim_list[0]);
@@ -296,7 +296,14 @@ GT_GEOPrimCollectVDB::endCollecting(
     if (!prims.entries())
 	return GT_PrimitiveHandle();
 
+#if (UT_VERSION_INT >= 0x0f000000) // 15.0 or later
+    GU_DetailHandleAutoReadLock gdl(g->getGeometry(0));
+    const GU_Detail* detail = gdl.getGdp();
+    gt_RefineVDB task(*detail, prims);
+#else
     gt_RefineVDB task(g->getGeometry(0), prims);
+#endif
+
     UTparallelReduce(UT_BlockedRange<exint>(0, prims.entries()), task);
 
     GT_DataArrayHandle vertex_counts = task.myVertexCounts.allocateArray();
@@ -314,6 +321,6 @@ GT_GEOPrimCollectVDB::endCollecting(
 			/*wrap*/false));
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

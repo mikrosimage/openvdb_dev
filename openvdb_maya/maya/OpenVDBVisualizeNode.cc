@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -28,6 +28,8 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 
+/// @file OpenVDBVisualizeNode.cc
+///
 /// @author FX R&D OpenVDB team
 
 #include "OpenVDBPlugin.h"
@@ -580,8 +582,8 @@ OpenVDBVisualizeNode::draw(M3dView & view, const MDagPath& /*path*/,
 
         if ((isSelected || bbox) && MPlug(thisNode, aCachedBBox).asBool()) {
 
-            if (isSelected) glColor3f(0.9, 0.9, 0.3);
-            else glColor3f(0.045, 0.045, 0.045);
+            if (isSelected) glColor3f(0.9f, 0.9f, 0.3f);
+            else glColor3f(0.045f, 0.045f, 0.045f);
 
             for (size_t n = 0, N = mBBoxBuffers.size(); n < N; ++n) {
                 mBBoxBuffers[n].render();
@@ -611,6 +613,6 @@ OpenVDBVisualizeNode::boundingBox() const
     return MBoundingBox(MPoint(-1.0, -1.0, -1.0), MPoint(1.0, 1.0, 1.0));
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

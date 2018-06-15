@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -28,6 +28,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 
+/// @file unittest/TestLevelSetRayIntersector.cc
 /// @author Ken Museth
 
 // Uncomment to enable statistics of ray-intersections
@@ -45,13 +46,10 @@
 #ifdef STATS_TEST
 //only needed for statistics
 #include <openvdb/math/Stats.h>
-#include "util.h"//for CpuTimer
+#include <openvdb/util/CpuTimer.h>
 #include <iostream>
 #endif
 
-
-#define ASSERT_DOUBLES_EXACTLY_EQUAL(expected, actual) \
-    CPPUNIT_ASSERT_DOUBLES_EQUAL((expected), (actual), /*tolerance=*/0.0);
 
 #define ASSERT_DOUBLES_APPROX_EQUAL(expected, actual) \
     CPPUNIT_ASSERT_DOUBLES_EQUAL((expected), (actual), /*tolerance=*/1.e-6);
@@ -103,7 +101,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL(15.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(13.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(13.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         ASSERT_DOUBLES_APPROX_EQUAL(t0, time);
@@ -131,7 +129,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL(15.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(13.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(13.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         ASSERT_DOUBLES_APPROX_EQUAL(t0, time);
@@ -158,7 +156,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL(15.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(17.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(17.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         ASSERT_DOUBLES_APPROX_EQUAL(t0, time);
@@ -187,7 +185,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL(15.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(17.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(17.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         ASSERT_DOUBLES_APPROX_EQUAL(t0, time);
@@ -217,7 +215,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL(15.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(11.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(11.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         ASSERT_DOUBLES_APPROX_EQUAL(t0, time);
@@ -247,7 +245,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL(15.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(11.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(11.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         ASSERT_DOUBLES_APPROX_EQUAL(t0, time);
@@ -278,7 +276,7 @@ TestLevelSetRayIntersector::tests()
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[0]);
         ASSERT_DOUBLES_APPROX_EQUAL( 0.0, xyz[1]);
         ASSERT_DOUBLES_APPROX_EQUAL(25.0, xyz[2]);
-        ASSERT_DOUBLES_APPROX_EQUAL(21.0, time); 
+        ASSERT_DOUBLES_APPROX_EQUAL(21.0, time);
         double t0=0, t1=0;
         CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
         //std::cerr << "t0 = " << t0 << " t1 = " << t1 << std::endl;
@@ -339,7 +337,7 @@ TestLevelSetRayIntersector::tests()
 
         for (size_t i=0; i<width; ++i) {
             for (size_t j=0; j<width; ++j) {
-                const Vec3T eye(dx*i, dx*j, 0.0);
+                const Vec3T eye(dx*double(i), dx*double(j), 0.0);
                 const RayT ray(eye, dir);
                 if (lsri.intersectsWS(ray, xyz, time)){
                     CPPUNIT_ASSERT(ray.intersects(c, r, t0, t1));
@@ -359,7 +357,7 @@ TestLevelSetRayIntersector::stats()
     using namespace openvdb;
     typedef math::Ray<double>  RayT;
     typedef RayT::Vec3Type     Vec3T;
-    unittest_util::CpuTimer timer;
+    util::CpuTimer timer;
 
     {// generate an image, benchmarks and statistics
 
@@ -402,7 +400,7 @@ TestLevelSetRayIntersector::stats()
         }
         timer.stop();
 
-        film.savePPM("/tmp/sphere_serial");
+        film.savePPM("sphere_serial");
         stats.print("First hit");
         hist.print("First hit");
     }
@@ -411,6 +409,6 @@ TestLevelSetRayIntersector::stats()
 
 #undef STATS_TEST
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

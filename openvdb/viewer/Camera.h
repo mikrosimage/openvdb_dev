@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -36,6 +36,10 @@
 
 #include <openvdb/Types.h>
 
+#ifdef OPENVDB_USE_GLFW_3
+struct GLFWwindow; // forward declaration
+#endif
+
 
 namespace openvdb_viewer {
 
@@ -43,6 +47,10 @@ class Camera
 {
 public:
     Camera();
+
+#ifdef OPENVDB_USE_GLFW_3
+    void setWindow(GLFWwindow* w) { mWindow = w; }
+#endif
 
     void aim();
 
@@ -53,7 +61,7 @@ public:
 
     void setNearFarPlanes(double n, double f) { mNearPlane = n; mFarPlane = f; }
     void setFieldOfView(double degrees) { mFov = degrees; }
-    void setSpeed(double zoomSpeed, double strafeSpeed, double tumblingSpeed);
+    void setSpeed(double zoomSpeed = 0.1, double strafeSpeed = 0.002, double tumblingSpeed = 0.02);
 
     void keyCallback(int key, int action);
     void mouseButtonCallback(int button, int action);
@@ -72,7 +80,10 @@ private:
     // Input states
     bool mMouseDown, mStartTumbling, mZoomMode, mChanged, mNeedsDisplay;
     double mMouseXPos, mMouseYPos;
-    int mWheelPos;
+
+#ifdef OPENVDB_USE_GLFW_3
+    GLFWwindow* mWindow;
+#endif
 
     static const double sDeg2rad;
 }; // class Camera
@@ -81,6 +92,6 @@ private:
 
 #endif // OPENVDB_VIEWER_CAMERA_HAS_BEEN_INCLUDED
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

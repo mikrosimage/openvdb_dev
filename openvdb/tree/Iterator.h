@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -28,7 +28,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 //
-/// @file Iterator.h
+/// @file tree/Iterator.h
 ///
 /// @author Peter Cucka and Ken Museth
 
@@ -36,9 +36,7 @@
 #define OPENVDB_TREE_ITERATOR_HAS_BEEN_INCLUDED
 
 #include <sstream>
-#include <boost/static_assert.hpp>
-#include <boost/type_traits/is_const.hpp>
-#include <boost/type_traits/remove_const.hpp>
+#include <type_traits>
 #include <openvdb/util/NodeMasks.h>
 #include <openvdb/Exceptions.h>
 
@@ -58,15 +56,10 @@ template<typename MaskIterT, typename NodeT>
 class IteratorBase
 {
 public:
-    IteratorBase(): mParentNode(NULL) {}
-    IteratorBase(const MaskIterT& iter, NodeT* parent):
-        mParentNode(parent), mMaskIter(iter) {}
-
-    void operator=(const IteratorBase& other)
-    {
-        mParentNode = other.mParentNode;
-        mMaskIter = other.mMaskIter;
-    }
+    IteratorBase(): mParentNode(nullptr) {}
+    IteratorBase(const MaskIterT& iter, NodeT* parent): mParentNode(parent), mMaskIter(iter) {}
+    IteratorBase(const IteratorBase&) = default;
+    IteratorBase& operator=(const IteratorBase&) = default;
 
     bool operator==(const IteratorBase& other) const
     {
@@ -147,10 +140,10 @@ template<
     typename ItemT>     // type of value to which this iterator points
 struct SparseIteratorBase: public IteratorBase<MaskIterT, NodeT>
 {
-    typedef NodeT NodeType;
-    typedef ItemT ValueType;
-    typedef typename boost::remove_const<NodeT>::type NonConstNodeType;
-    typedef typename boost::remove_const<ItemT>::type NonConstValueType;
+    using NodeType = NodeT;
+    using ValueType = ItemT;
+    using NonConstNodeType = typename std::remove_const<NodeT>::type;
+    using NonConstValueType = typename std::remove_const<ItemT>::type;
     static const bool IsSparseIterator = true, IsDenseIterator = false;
 
     SparseIteratorBase() {}
@@ -178,7 +171,7 @@ struct SparseIteratorBase: public IteratorBase<MaskIterT, NodeT>
     /// (Not valid for const iterators.)
     void setValue(const ItemT& value) const
     {
-        BOOST_STATIC_ASSERT(!boost::is_const<NodeT>::value);
+        static_assert(!std::is_const<NodeT>::value, "setValue() not allowed for const iterators");
         static_cast<const IterT*>(this)->setItem(this->pos(), value); // static polymorphism
     }
     /// @brief Apply a functor to the item to which this iterator is pointing.
@@ -189,7 +182,8 @@ struct SparseIteratorBase: public IteratorBase<MaskIterT, NodeT>
     template<typename ModifyOp>
     void modifyValue(const ModifyOp& op) const
     {
-        BOOST_STATIC_ASSERT(!boost::is_const<NodeT>::value);
+        static_assert(!std::is_const<NodeT>::value,
+            "modifyValue() not allowed for const iterators");
         static_cast<const IterT*>(this)->modifyItem(this->pos(), op); // static polymorphism
     }
 }; // class SparseIteratorBase
@@ -210,12 +204,12 @@ template<
     typename UnsetItemT> // type of unset value (ValueType, usually)
 struct DenseIteratorBase: public IteratorBase<MaskIterT, NodeT>
 {
-    typedef NodeT NodeType;
-    typedef UnsetItemT ValueType;
-    typedef SetItemT ChildNodeType;
-    typedef typename boost::remove_const<NodeT>::type NonConstNodeType;
-    typedef typename boost::remove_const<UnsetItemT>::type NonConstValueType;
-    typedef typename boost::remove_const<SetItemT>::type NonConstChildNodeType;
+    using NodeType = NodeT;
+    using ValueType = UnsetItemT;
+    using ChildNodeType = SetItemT;
+    using NonConstNodeType = typename std::remove_const<NodeT>::type;
+    using NonConstValueType = typename std::remove_const<UnsetItemT>::type;
+    using NonConstChildNodeType = typename std::remove_const<SetItemT>::type;
     static const bool IsSparseIterator = false, IsDenseIterator = true;
 
     DenseIteratorBase() {}
@@ -238,10 +232,10 @@ struct DenseIteratorBase: public IteratorBase<MaskIterT, NodeT>
     bool isChildNode() const { return this->parent().isChildMaskOn(this->pos()); }
 
     /// @brief If this iterator is pointing to a child node, return a pointer to the node.
-    /// Otherwise, return NULL and, in @a value, the value to which this iterator is pointing.
+    /// Otherwise, return nullptr and, in @a value, the value to which this iterator is pointing.
     SetItemT* probeChild(NonConstValueType& value) const
     {
-        SetItemT* child = NULL;
+        SetItemT* child = nullptr;
         static_cast<const IterT*>(this)->getItem(this->pos(), child, value); // static polymorphism
         return child;
     }
@@ -251,14 +245,14 @@ struct DenseIteratorBase: public IteratorBase<MaskIterT, NodeT>
     bool probeChild(SetItemT*& child, NonConstValueType& value) const
     {
         child = probeChild(value);
-        return (child != NULL);
+        return (child != nullptr);
     }
 
     /// @brief Return @c true if this iterator is pointing to a value and return
     /// the value in @a value.  Otherwise, return @c false.
     bool probeValue(NonConstValueType& value) const
     {
-        SetItemT* child = NULL;
+        SetItemT* child = nullptr;
         const bool isChild = static_cast<const IterT*>(this)-> // static polymorphism
             getItem(this->pos(), child, value);
         return !isChild;
@@ -285,6 +279,6 @@ struct DenseIteratorBase: public IteratorBase<MaskIterT, NodeT>
 
 #endif // OPENVDB_TREE_ITERATOR_HAS_BEEN_INCLUDED
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

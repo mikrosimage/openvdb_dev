@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -57,6 +57,7 @@ public:
     CPPUNIT_TEST(testMerge);
     CPPUNIT_TEST(testCombine);
     CPPUNIT_TEST(testBoolTree);
+    CPPUNIT_TEST(testMedian);
     //CPPUNIT_TEST(testFilter);
     CPPUNIT_TEST_SUITE_END();
 
@@ -73,6 +74,7 @@ public:
     void testMerge();
     void testCombine();
     void testBoolTree();
+    void testMedian();
     //void testFilter();
 };
 
@@ -97,6 +99,23 @@ TestLeafBool::testGetValue()
         LeafType leaf(openvdb::Coord(0, 0, 0), /*background=*/true);
         for (openvdb::Index n = 0; n < leaf.numValues(); ++n) {
             CPPUNIT_ASSERT_EQUAL(true, leaf.getValue(leaf.offsetToLocalCoord(n)));
+        }
+    }
+    {// test Buffer::data()
+        LeafType leaf(openvdb::Coord(0, 0, 0), /*background=*/false);
+        leaf.fill(true);
+        LeafType::Buffer::WordType* w = leaf.buffer().data();
+        for (openvdb::Index n = 0; n < LeafType::Buffer::WORD_COUNT; ++n) {
+            CPPUNIT_ASSERT_EQUAL(~LeafType::Buffer::WordType(0), w[n]);
+        }
+    }
+    {// test const Buffer::data()
+        LeafType leaf(openvdb::Coord(0, 0, 0), /*background=*/false);
+        leaf.fill(true);
+        const LeafType& cleaf = leaf;
+        const LeafType::Buffer::WordType* w = cleaf.buffer().data();
+        for (openvdb::Index n = 0; n < LeafType::Buffer::WORD_COUNT; ++n) {
+            CPPUNIT_ASSERT_EQUAL(~LeafType::Buffer::WordType(0), w[n]);
         }
     }
 }
@@ -206,47 +225,61 @@ TestLeafBool::testEquivalence()
 {
     using openvdb::CoordBBox;
     using openvdb::Coord;
-
-    LeafType leaf(Coord(0, 0, 0), false); // false and inactive
-    LeafType leaf2(Coord(0, 0, 0), true); // true and inactive
-
-    CPPUNIT_ASSERT(leaf != leaf2);
-
-    leaf.fill(CoordBBox(Coord(0), Coord(LeafType::DIM - 1)), true, /*active=*/false);
-    CPPUNIT_ASSERT(leaf == leaf2); // true and inactive
-
-    leaf.setValuesOn(); // true and active
-
-    leaf2.fill(CoordBBox(Coord(0), Coord(LeafType::DIM - 1)), false); // false and active
-    CPPUNIT_ASSERT(leaf != leaf2);
-
-    leaf.negate(); // false and active
-    CPPUNIT_ASSERT(leaf == leaf2);
-
-    // Set some values.
-    leaf.setValueOn(Coord(0, 0, 0), true);
-    leaf.setValueOn(Coord(0, 1, 0), true);
-    leaf.setValueOn(Coord(1, 1, 0), true);
-    leaf.setValueOn(Coord(1, 1, 2), true);
-
-    leaf2.setValueOn(Coord(0, 0, 0), true);
-    leaf2.setValueOn(Coord(0, 1, 0), true);
-    leaf2.setValueOn(Coord(1, 1, 0), true);
-    leaf2.setValueOn(Coord(1, 1, 2), true);
-
-    CPPUNIT_ASSERT(leaf == leaf2);
-
-    leaf2.setValueOn(Coord(0, 0, 1), true);
-
-    CPPUNIT_ASSERT(leaf != leaf2);
-
-    leaf2.setValueOff(Coord(0, 0, 1), false);
-
-    CPPUNIT_ASSERT(leaf != leaf2);
-
-    leaf2.setValueOn(Coord(0, 0, 1));
-
-    CPPUNIT_ASSERT(leaf == leaf2);
+    {
+        LeafType leaf(Coord(0, 0, 0), false); // false and inactive
+        LeafType leaf2(Coord(0, 0, 0), true); // true and inactive
+        
+        CPPUNIT_ASSERT(leaf != leaf2);
+        
+        leaf.fill(CoordBBox(Coord(0), Coord(LeafType::DIM - 1)), true, /*active=*/false);
+        CPPUNIT_ASSERT(leaf == leaf2); // true and inactive
+        
+        leaf.setValuesOn(); // true and active
+        
+        leaf2.fill(CoordBBox(Coord(0), Coord(LeafType::DIM - 1)), false); // false and active
+        CPPUNIT_ASSERT(leaf != leaf2);
+        
+        leaf.negate(); // false and active
+        CPPUNIT_ASSERT(leaf == leaf2);
+        
+        // Set some values.
+        leaf.setValueOn(Coord(0, 0, 0), true);
+        leaf.setValueOn(Coord(0, 1, 0), true);
+        leaf.setValueOn(Coord(1, 1, 0), true);
+        leaf.setValueOn(Coord(1, 1, 2), true);
+        
+        leaf2.setValueOn(Coord(0, 0, 0), true);
+        leaf2.setValueOn(Coord(0, 1, 0), true);
+        leaf2.setValueOn(Coord(1, 1, 0), true);
+        leaf2.setValueOn(Coord(1, 1, 2), true);
+        
+        CPPUNIT_ASSERT(leaf == leaf2);
+        
+        leaf2.setValueOn(Coord(0, 0, 1), true);
+        
+        CPPUNIT_ASSERT(leaf != leaf2);
+        
+        leaf2.setValueOff(Coord(0, 0, 1), false);
+        
+        CPPUNIT_ASSERT(leaf != leaf2);
+        
+        leaf2.setValueOn(Coord(0, 0, 1));
+        
+        CPPUNIT_ASSERT(leaf == leaf2);
+    }
+    {// test LeafNode<bool>::operator==()
+        LeafType leaf1(Coord(0            , 0, 0), true); // true and inactive
+        LeafType leaf2(Coord(1            , 0, 0), true); // true and inactive
+        LeafType leaf3(Coord(LeafType::DIM, 0, 0), true); // true and inactive
+        LeafType leaf4(Coord(0            , 0, 0), true, true);//true and active
+        CPPUNIT_ASSERT(leaf1 == leaf2);
+        CPPUNIT_ASSERT(leaf1 != leaf3);
+        CPPUNIT_ASSERT(leaf2 != leaf3);
+        CPPUNIT_ASSERT(leaf1 != leaf4);
+        CPPUNIT_ASSERT(leaf2 != leaf4);
+        CPPUNIT_ASSERT(leaf3 != leaf4);
+    }
+        
 }
 
 
@@ -357,7 +390,7 @@ TestLeafBool::testTopologyCopy()
     std::set<Coord> coords;
     for (openvdb::Index n = 0; n < fleaf.numValues(); n += 10) {
         Coord xyz = fleaf.offsetToGlobalCoord(n);
-        fleaf.setValueOn(xyz, n);
+        fleaf.setValueOn(xyz, float(n));
         coords.insert(xyz);
     }
 
@@ -485,7 +518,7 @@ TestLeafBool::testBoolTree()
     GridPtrVec grids;
     grids.push_back(inGrid);
     grids.push_back(outGrid);
-    io::File vdbFile("/tmp/bool_tree.vdb2");
+    io::File vdbFile("bool_tree.vdb2");
     vdbFile.write(grids);
     vdbFile.close();
 #endif
@@ -503,6 +536,64 @@ TestLeafBool::testBoolTree()
     CPPUNIT_ASSERT(boolTreeMem * 10 <= floatTreeMem);
 }
 
+void
+TestLeafBool::testMedian()
+{
+    using namespace openvdb;
+    LeafType leaf(openvdb::Coord(0, 0, 0), /*background=*/false);
+    bool state = false;
+    
+    CPPUNIT_ASSERT_EQUAL(Index(0), leaf.medianOn(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT_EQUAL(leaf.numValues(), leaf.medianOff(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT(!leaf.medianAll());
+
+    leaf.setValue(Coord(0,0,0), true);
+    CPPUNIT_ASSERT_EQUAL(Index(1), leaf.medianOn(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT_EQUAL(leaf.numValues()-1, leaf.medianOff(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT(!leaf.medianAll());
+
+    leaf.setValue(Coord(0,0,1), true);
+    CPPUNIT_ASSERT_EQUAL(Index(2), leaf.medianOn(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT_EQUAL(leaf.numValues()-2, leaf.medianOff(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT(!leaf.medianAll());
+    
+    leaf.setValue(Coord(5,0,1), true);
+    CPPUNIT_ASSERT_EQUAL(Index(3), leaf.medianOn(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT_EQUAL(leaf.numValues()-3, leaf.medianOff(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT(!leaf.medianAll());
+
+    leaf.fill(false, false);
+    CPPUNIT_ASSERT_EQUAL(Index(0), leaf.medianOn(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT_EQUAL(leaf.numValues(), leaf.medianOff(state));
+    CPPUNIT_ASSERT(state == false);
+    CPPUNIT_ASSERT(!leaf.medianAll());
+
+    for (Index i=0; i<leaf.numValues()/2; ++i) {
+        leaf.setValueOn(i, true);
+        CPPUNIT_ASSERT(!leaf.medianAll());
+        CPPUNIT_ASSERT_EQUAL(Index(i+1), leaf.medianOn(state));
+        CPPUNIT_ASSERT(state == false);
+        CPPUNIT_ASSERT_EQUAL(leaf.numValues()-i-1, leaf.medianOff(state));
+        CPPUNIT_ASSERT(state == false);
+    }
+    for (Index i=leaf.numValues()/2; i<leaf.numValues(); ++i) {
+        leaf.setValueOn(i, true);
+        CPPUNIT_ASSERT(leaf.medianAll());
+        CPPUNIT_ASSERT_EQUAL(Index(i+1), leaf.medianOn(state));
+        CPPUNIT_ASSERT(state == true);
+        CPPUNIT_ASSERT_EQUAL(leaf.numValues()-i-1, leaf.medianOff(state));
+        CPPUNIT_ASSERT(state == false);
+    }
+}
 
 // void
 // TestLeafBool::testFilter()
@@ -531,7 +622,7 @@ TestLeafBool::testBoolTree()
 //     GridPtrVec grids;
 //     grids.push_back(copyOfGrid);
 //     grids.push_back(grid);
-//     io::File vdbFile("/tmp/TestLeafBool::testFilter.vdb2");
+//     io::File vdbFile("TestLeafBool::testFilter.vdb2");
 //     vdbFile.write(grids);
 //     vdbFile.close();
 // #endif
@@ -541,6 +632,6 @@ TestLeafBool::testBoolTree()
 //     CPPUNIT_ASSERT(tree->hasSameTopology(*copyOfTree));
 // }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

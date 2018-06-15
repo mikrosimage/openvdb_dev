@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -38,23 +38,39 @@
 #include <openvdb_houdini/SOP_NodeVDB.h>
 #include <openvdb_houdini/Utils.h>
 
-#include <openvdb/tools/VolumeToSpheres.h>
 #include <openvdb/tools/RayIntersector.h>
+#include <openvdb/tools/VolumeToSpheres.h> // for ClosestSurfacePoint
 
-#include <UT/UT_Interrupt.h>
-#include <GA/GA_PageIterator.h>
+#include <GA/GA_PageHandle.h>
+#include <GA/GA_SplittableRange.h>
 #include <GU/GU_Detail.h>
 #include <PRM/PRM_Parm.h>
-#include <GU/GU_PrimSphere.h>
+#include <UT/UT_Interrupt.h>
+#include <UT/UT_Version.h>
 
+#if UT_VERSION_INT >= 0x10050000 // 16.5.0 or later
+#include <hboost/algorithm/string/join.hpp>
+#else
 #include <boost/algorithm/string/join.hpp>
+#endif
 
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
 
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
+#if UT_VERSION_INT < 0x10050000 // earlier than 16.5.0
+namespace hboost = boost;
+#endif
 
 
 ////////////////////////////////////////
@@ -64,15 +80,21 @@ class SOP_OpenVDB_Ray: public hvdb::SOP_NodeVDB
 {
 public:
     SOP_OpenVDB_Ray(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Ray() {};
+    ~SOP_OpenVDB_Ray() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
-    virtual int isRefInput(unsigned i) const { return (i > 0); }
+    int isRefInput(unsigned i) const override { return (i > 0); }
+
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions { OP_ERROR cookVDBSop(OP_Context&) override; };
+#else
+protected:
+    OP_ERROR cookVDBSop(OP_Context&) override;
+#endif
 
 protected:
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
+    bool updateParmsFlags() override;
 };
 
 
@@ -81,72 +103,89 @@ protected:
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
     parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
-        .setHelpText("Specify a subset of the input VDB grids to surface.")
-        .setChoiceList(&hutil::PrimGroupMenu));
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Specify a subset of the input VDB grids to process.")
+        .setDocumentation(
+            "A subset of VDBs to process (see [specifying volumes|/model/volumes#group])"));
 
-    { // Method
-        const char* items[] = {
-            "rayintersection", "Ray Intersection",
-            "closestpoint",   "Closest Surface Point",
-            NULL
-        };
-
-        parms.add(hutil::ParmFactory(PRM_ORD, "method", "Method")
-            .setDefault(PRMzeroDefaults)
-            .setHelpText("Projection method")
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items));
-    }
+    // Method
+    parms.add(hutil::ParmFactory(PRM_ORD, "method", "Method")
+        .setDefault(PRMzeroDefaults)
+        .setTooltip("Projection method")
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
+            "rayintersection",  "Ray Intersection",
+            "closestpoint",     "Closest Surface Point"
+        }));
 
     parms.add(hutil::ParmFactory(PRM_FLT_J, "isovalue", "Isovalue")
         .setDefault(PRMzeroDefaults)
         .setRange(PRM_RANGE_UI, -1.0, PRM_RANGE_UI, 1.0)
-        .setHelpText("The crossing point of the VDB values that is considered "
-            "the surface. The zero default value works for signed distance "
-            "fields while fog volumes require a larger positive value, 0.5 is "
-            "a good initial guess."));
+        .setTooltip(
+            "The voxel value that defines the surface\n\n"
+            "Zero works for signed distance fields, while fog volumes require"
+            " a larger positive value (0.5 is a good initial guess)."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "dotrans", "Transform")
         .setDefault(PRMoneDefaults)
-        .setHelpText("Move the intersected geometry."));
+        .setTooltip("If enabled, transform the intersected geometry."));
 
     parms.add(hutil::ParmFactory(PRM_FLT_J, "scale", "Scale")
         .setDefault(PRMoneDefaults)
-        .setRange(PRM_RANGE_UI, 0, PRM_RANGE_UI, 1));
+        .setRange(PRM_RANGE_UI, 0, PRM_RANGE_UI, 1)
+        .setTooltip("Specify the amount by which to scale the intersected geometry."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "putdist", "Store Distances")
-        .setHelpText("Creates a point attribute for the distance to the "
-            "collision surface or the closest surface point."));
+        .setTooltip(
+            "Create a point attribute giving the distance to the"
+            " collision surface or to the closest surface point."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "lookfar", "Intersect Farthest Surface")
-        .setHelpText("The farthest intersection point is used instead of the closest."));
+        .setTooltip("Use the farthest intersection point instead of the closest."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "reverserays", "Reverse Rays")
-        .setHelpText("Make rays fire in the direction opposite to the normals."));
+        .setTooltip("Make rays fire in the direction opposite to the normals."));
 
     parms.add(hutil::ParmFactory(PRM_FLT_J, "bias", "Bias")
         .setDefault(PRMzeroDefaults)
         .setRange(PRM_RANGE_UI, 0, PRM_RANGE_UI, 1)
-        .setHelpText("Offsets the starting position of the rays."));
+        .setTooltip("Offset the starting position of the rays."));
 
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "creategroup", "Create Ray Hit Group")
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN)
-        .setHelpText("Point group of all successful intersections"));
+        .setTooltip("If enabled, create a point group to hold all successful intersections"));
 
     parms.add(hutil::ParmFactory(PRM_STRING, "hitgrp", "Ray Hit Group")
         .setDefault("rayHitGroup")
-        .setHelpText("Point group name"));
-
+        .setTooltip("Point group name"));
 
     //////////
 
     hvdb::OpenVDBOpFactory("OpenVDB Ray", SOP_OpenVDB_Ray::factory, parms, *table)
         .addInput("points")
-        .addInput("level set grids");
+        .addInput("level set grids")
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Ray::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Project geometry onto a level set VDB volume.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node performs geometry projections using level set ray intersections\n\
+or closest point queries.\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
 }
 
 
@@ -222,7 +261,7 @@ public:
     {
         GA_Offset start, end;
         GA_Index pointIndex;
-        typedef openvdb::math::Ray<double> RayT;
+        using RayT = openvdb::math::Ray<double>;
         openvdb::Vec3d eye, dir, intersection;
 
         const bool doScaling = !openvdb::math::isApproxEqual(mScale, 1.0);
@@ -302,10 +341,9 @@ inline void
 closestPoints(const GridT& grid, float isovalue, const GU_Detail& gdp,
     UT_FloatArray& distances, UT_Vector3Array* positions, InterrupterT& boss)
 {
-
     std::vector<openvdb::Vec3R> tmpPoints(distances.entries());
 
-    GA_ROHandleV3 points(gdp.getP());
+    GA_ROHandleV3 points = GA_ROHandleV3(gdp.getP());
 
     for (size_t n = 0, N = tmpPoints.size(); n < N; ++n) {
         const UT_Vector3 pos = points.get(gdp.pointOffset(n));
@@ -314,28 +352,25 @@ closestPoints(const GridT& grid, float isovalue, const GU_Detail& gdp,
         tmpPoints[n][2] = pos.z();
     }
 
-
     std::vector<float> tmpDistances;
 
-    const bool transformPoints = (positions != NULL);
+    const bool transformPoints = (positions != nullptr);
 
-    openvdb::tools::ClosestSurfacePoint<GridT> closestPoint;
-    closestPoint.initialize(grid, isovalue, &boss);
+    auto closestPoint = openvdb::tools::ClosestSurfacePoint<GridT>::create(grid, isovalue, &boss);
+    if (!closestPoint) return;
 
-    if (transformPoints) closestPoint.searchAndReplace(tmpPoints, tmpDistances);
-    else closestPoint.search(tmpPoints, tmpDistances);
+    if (transformPoints) closestPoint->searchAndReplace(tmpPoints, tmpDistances);
+    else closestPoint->search(tmpPoints, tmpDistances);
 
     for (size_t n = 0, N = tmpDistances.size(); n < N; ++n) {
-
-
         if (tmpDistances[n] < distances(n)) {
             distances(n) = tmpDistances[n];
             if (transformPoints) {
                 UT_Vector3& pos = (*positions)(n);
 
-                pos.x() = tmpPoints[n].x();
-                pos.y() = tmpPoints[n].y();
-                pos.z() = tmpPoints[n].z();
+                pos.x() = float(tmpPoints[n].x());
+                pos.y() = float(tmpPoints[n].y());
+                pos.z() = float(tmpPoints[n].z());
             }
         }
     }
@@ -398,24 +433,23 @@ private:
 
 
 OP_ERROR
-SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Ray)::cookVDBSop(OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
+        duplicateSource(0, context);
+#endif
+
         const fpreal time = context.getTime();
 
-        duplicateSource(0, context);
-
-        hvdb::Interrupter boss("OpenVDB Ray");
+        hvdb::Interrupter boss("Computing VDB ray intersections");
 
         const GU_Detail* vdbGeo = inputGeo(1);
-        if(vdbGeo == NULL) return error();
+        if (vdbGeo == nullptr) return error();
 
         // Get the group of grids to surface.
-        UT_String groupStr;
-        evalString(groupStr, "group", 0, time);
-        const GA_PrimitiveGroup* group =
-            matchGroup(const_cast<GU_Detail&>(*vdbGeo), groupStr.toStdString());
+        const GA_PrimitiveGroup* group = matchGroup(*vdbGeo, evalStdString("group", time));
         hvdb::VdbPrimCIterator vdbIt(vdbGeo, group);
 
         if (!vdbIt) {
@@ -429,19 +463,14 @@ SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
         const bool rayIntersection = evalInt("method", 0, time) == 0;
         const double scale = double(evalFloat("scale", 0, time));
         const double bias = double(evalFloat("bias", 0, time));
-        const float isovalue = evalFloat("isovalue", 0, time);
+        const float isovalue = float(evalFloat("isovalue", 0, time));
 
         UT_Vector3Array pointNormals;
 
         GA_ROAttributeRef attributeRef = gdp->findPointAttribute("N");
         if (attributeRef.isValid()) {
-#if (UT_VERSION_INT >= 0x0d0000c0)  // 13.0.192 or later
             gdp->getAttributeAsArray(
                 attributeRef.getAttribute(), gdp->getPointRange(), pointNormals);
-#else
-            gdp->getPointAttributeAsArray(
-                attributeRef.getAttribute(), gdp->getPointRange(), pointNormals);
-#endif
         } else {
             gdp->normal(pointNormals, /*use_internaln=*/false);
         }
@@ -455,16 +484,13 @@ SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
 
         const double limit = std::numeric_limits<double>::max();
         UT_FloatArray distances;
-        distances.appendMultiple((keepMaxDist && rayIntersection) ? -limit : limit, numPoints);
-
-
+        distances.appendMultiple(
+            float((keepMaxDist && rayIntersection) ? -limit : limit), numPoints);
 
         std::vector<std::string> skippedGrids;
 
         for (; vdbIt; ++vdbIt) {
             if (boss.wasInterrupted()) break;
-
-            std::vector<openvdb::Vec4s> spheres;
 
             if (vdbIt->getGrid().getGridClass() == openvdb::GRID_LEVEL_SET &&
                 vdbIt->getGrid().type() == openvdb::FloatGrid::gridType()) {
@@ -487,7 +513,6 @@ SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
             }
         }
 
-
         if (bool(evalInt("dotrans", 0, time))) { // update point positions
 
             if (!rayIntersection && !openvdb::math::isApproxEqual(scale, 1.0)) {
@@ -502,23 +527,17 @@ SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
 
             GA_RWAttributeRef aRef = gdp->findPointAttribute("dist");
             if (!aRef.isValid()) {
-                aRef = gdp->addIntTuple(GA_ATTRIB_POINT, "dist", 1, GA_Defaults(0));
+                aRef = gdp->addFloatTuple(GA_ATTRIB_POINT, "dist", 1, GA_Defaults(0.0));
             }
-#if (UT_VERSION_INT >= 0x0d0000c0)  // 13.0.192 or later
             gdp->setAttributeFromArray(aRef.getAttribute(), gdp->getPointRange(), distances);
-#else
-            gdp->setPointAttributeFromArray(aRef.getAttribute(), gdp->getPointRange(), distances);
-#endif
         }
 
         if (rayIntersection && bool(evalInt("creategroup", 0, time))) { // group intersecting points
 
-            groupStr = "";
-            evalString(groupStr, "hitgrp", 0, time);
-
-            if(groupStr.length() > 0) {
-                GA_PointGroup *pointGroup = gdp->findPointGroup(groupStr);
-                if (!pointGroup) pointGroup = gdp->newPointGroup(groupStr);
+            const auto groupStr = evalStdString("hitgrp", time);
+            if (!groupStr.empty()) {
+                GA_PointGroup *pointGroup = gdp->findPointGroup(groupStr.c_str());
+                if (!pointGroup) pointGroup = gdp->newPointGroup(groupStr.c_str());
 
                 for (size_t n = 0; n < numPoints; ++n) {
                     if (intersections[n]) pointGroup->addIndex(n);
@@ -528,7 +547,7 @@ SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
 
         if (!skippedGrids.empty()) {
             std::string s = "Only level set grids are supported, the following "
-                "were skipped: '" + boost::algorithm::join(skippedGrids, ", ") + "'.";
+                "were skipped: '" + hboost::algorithm::join(skippedGrids, ", ") + "'.";
             addWarning(SOP_MESSAGE, s.c_str());
         }
 
@@ -544,6 +563,6 @@ SOP_OpenVDB_Ray::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

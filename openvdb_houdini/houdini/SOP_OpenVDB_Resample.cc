@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -48,28 +48,46 @@
 #include <openvdb/tools/LevelSetRebuild.h>
 #include <openvdb/tools/VectorTransformer.h> // for transformVectors()
 #include <UT/UT_Interrupt.h>
+#include <UT/UT_Version.h>
+#include <functional>
+#include <stdexcept>
+#include <string>
+
+#if UT_MAJOR_VERSION_INT >= 16
+#define VDB_COMPILABLE_SOP 1
+#else
+#define VDB_COMPILABLE_SOP 0
+#endif
+
 
 namespace hvdb = openvdb_houdini;
 namespace hutil = houdini_utils;
+
+namespace {
+enum { MODE_PARMS = 0, MODE_REF_GRID, MODE_VOXEL_SIZE, MODE_VOXEL_SCALE };
+}
 
 
 class SOP_OpenVDB_Resample: public hvdb::SOP_NodeVDB
 {
 public:
-    enum { MODE_PARMS = 0, MODE_REF_GRID = 1, MODE_VOXEL_SIZE = 2 };
-
     SOP_OpenVDB_Resample(OP_Network*, const char* name, OP_Operator*);
-    virtual ~SOP_OpenVDB_Resample() {};
+    ~SOP_OpenVDB_Resample() override {}
 
     static OP_Node* factory(OP_Network*, const char* name, OP_Operator*);
 
-    virtual int isRefInput(unsigned i) const { return (i == 1); }
+    int isRefInput(unsigned i) const override { return (i == 1); }
+
+#if VDB_COMPILABLE_SOP
+    class Cache: public SOP_VDBCacheOptions { OP_ERROR cookVDBSop(OP_Context&) override; };
+#else
+protected:
+    OP_ERROR cookVDBSop(OP_Context&) override;
+#endif
 
 protected:
-    struct RebuildOp;
-
-    virtual OP_ERROR cookMySop(OP_Context&);
-    virtual bool updateParmsFlags();
+    void resolveObsoleteParms(PRM_ParmList*) override;
+    bool updateParmsFlags() override;
 };
 
 
@@ -80,133 +98,244 @@ protected:
 void
 newSopOperator(OP_OperatorTable* table)
 {
-    if (table == NULL) return;
+    if (table == nullptr) return;
 
     hutil::ParmList parms;
 
     // Group pattern
     parms.add(hutil::ParmFactory(PRM_STRING, "group", "Group")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setHelpText("Specify a subset of the input\nVDB grids to be resampled"));
+        .setChoiceList(&hutil::PrimGroupMenuInput1)
+        .setTooltip("Specify a subset of the input VDBs to be resampled")
+        .setDocumentation(
+            "A subset of the input VDBs to be resampled"
+            " (see [specifying volumes|/model/volumes#group])"));
 
     // Reference grid group
-    parms.add(hutil::ParmFactory(PRM_STRING, "reference_grid", "Reference")
-        .setChoiceList(&hutil::PrimGroupMenu)
-        .setSpareData(&SOP_Node::theSecondInput)
-        .setHelpText(
-            "Specify a single reference grid from the\n"
+    parms.add(hutil::ParmFactory(PRM_STRING, "reference", "Reference")
+        .setChoiceList(&hutil::PrimGroupMenuInput2)
+        .setTooltip(
+            "Specify a single reference VDB from the\n"
             "first input whose transform is to be matched.\n"
-            "Alternatively, connect the reference grid\n"
+            "Alternatively, connect the reference VDB\n"
             "to the second input."));
 
-    {
-        const char* items[] = {
+    parms.add(hutil::ParmFactory(PRM_ORD, "order", "Interpolation")
+        .setDefault(PRMoneDefaults)
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
             "point",     "Nearest",
             "linear",    "Linear",
-            "quadratic", "Quadratic",
-            NULL
-        };
+            "quadratic", "Quadratic"
+        })
+        .setDocumentation("\
+How to interpolate values at fractional voxel positions\n\
+\n\
+Nearest:\n\
+    Use the value from the nearest voxel.\n\n\
+    This is fast but can cause aliasing artifacts.\n\
+Linear:\n\
+    Interpolate trilinearly between the values of immediate neighbors.\n\n\
+    This matches what [Node:sop/volumemix] and [Vex:volumesample] do.\n\
+Quadratic:\n\
+    Interpolate triquadratically between the values of neighbors.\n\n\
+    This produces smoother results than trilinear interpolation but is slower.\n"));
 
-        parms.add(hutil::ParmFactory(PRM_ORD, "order", "Interpolation")
-            .setDefault(PRMoneDefaults)
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items));
-    }
-
-    {   // Transform source
-        const char* items[] = {
-            "explicit",      "Explicitly",
-            "refvdb",        "To Match Reference VDB",
-            "voxelsizeonly", "Using Voxel Size Only",
-            NULL
-        };
-
-        parms.add(hutil::ParmFactory(PRM_ORD, "mode", "Define Transform")
-            .setDefault(PRMoneDefaults)
-            .setChoiceListItems(PRM_CHOICELIST_SINGLE, items)
-            .setHelpText(
-                "Specify how to define the relative transform\n"
-                "between an input and an output grid."));
-    }
+    // Transform source
+    parms.add(hutil::ParmFactory(PRM_ORD, "mode", "Define Transform")
+        .setDefault(PRMoneDefaults)
+        .setChoiceListItems(PRM_CHOICELIST_SINGLE, {
+            "explicit",       "Explicitly",
+            "refvdb",         "To Match Reference VDB",
+            "voxelsizeonly",  "Using Voxel Size Only",
+            "voxelscaleonly", "Using Voxel Scale Only"
+        })
+        .setTooltip(
+            "Specify how to define the relative transform\n"
+            "between an input and an output VDB.")
+        .setDocumentation("\
+How to generate the new VDB's transform\n\
+\n\
+Explicitly:\n\
+    Use the values of the transform parameters below.\n\
+To Match Reference VDB:\n\
+    Match the transform and voxel size of a reference VDB.\n\n\
+    The resulting volume is a copy of the input VDB,\n\
+    aligned to the reference VDB.\n\
+Using Voxel Size Only:\n\
+    Keep the transform of the input VDB but set a new voxel size,\n\
+    increasing or decreasing the resolution.\n\
+Using Voxel Scale Only:\n\
+    Keep the transform of the input VDB but scale the voxel size,\n\
+    increasing or decreasing the resolution.\n"));
 
     parms.add(hutil::ParmFactory(PRM_ORD, "xOrd", "Transform Order")
         .setDefault(0, "tsr")
         .setChoiceList(&PRMtrsMenu)
-        .setTypeExtended(PRM_TYPE_JOIN_PAIR));
+        .setTypeExtended(PRM_TYPE_JOIN_PAIR)
+        .setTooltip(
+            "When __Define Transform__ is Explicitly, the order of operations"
+            " for the new transform"));
 
     parms.add(hutil::ParmFactory(
         PRM_ORD | PRM_Type(PRM_Type::PRM_INTERFACE_LABEL_NONE), "rOrd", "")
         .setDefault(0, "zyx")
-        .setChoiceList(&PRMxyzMenu));
+        .setChoiceList(&PRMxyzMenu)
+        .setTooltip(
+            "When __Define Transform__ is Explicitly, the order of rotations"
+            " for the new transform"));
 
     // Translation
-    parms.add(hutil::ParmFactory(PRM_XYZ_J, "translate", "Translate")
+    parms.add(hutil::ParmFactory(PRM_XYZ_J, "t", "Translate")
         .setDefault(PRMzeroDefaults)
-        .setVectorSize(3));
+        .setVectorSize(3)
+        .setTooltip(
+            "When __Define Transform__ is Explicitly, the position for the new transform"));
 
     // Rotation
-    parms.add(hutil::ParmFactory(PRM_XYZ_J, "rotate", "Rotate")
+    parms.add(hutil::ParmFactory(PRM_XYZ_J, "r", "Rotate")
         .setDefault(PRMzeroDefaults)
-        .setVectorSize(3));
+        .setVectorSize(3)
+        .setTooltip(
+            "When __Define Transform__ is Explicitly, the rotation for the new transform"));
 
     // Scale
-    parms.add(hutil::ParmFactory(PRM_XYZ_J, "scale", "Scale")
+    parms.add(hutil::ParmFactory(PRM_XYZ_J, "s", "Scale")
         .setDefault(PRMoneDefaults)
         .setRange(PRM_RANGE_RESTRICTED, 0.000001f, PRM_RANGE_UI, 10)
-        .setVectorSize(3));
+        .setVectorSize(3)
+        .setTooltip(
+            "When __Define Transform__ is Explicitly, the scale for the new transform"));
 
     // Pivot
-    parms.add(hutil::ParmFactory(PRM_XYZ_J, "pivot", "Pivot")
+    parms.add(hutil::ParmFactory(PRM_XYZ_J, "p", "Pivot")
         .setDefault(PRMzeroDefaults)
-        .setVectorSize(3));
+        .setVectorSize(3)
+        .setTooltip(
+            "When __Define Transform__ is Explicitly, the world-space pivot point"
+            " for scaling and rotation in the new transform"));
 
     // Voxel size
-    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxel_size", "Voxel Size")
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelsize", "Voxel Size")
         .setDefault(PRMoneDefaults)
-        .setRange(PRM_RANGE_RESTRICTED, 0.000001f, PRM_RANGE_UI, 1));
+        .setRange(PRM_RANGE_RESTRICTED, 0.000001f, PRM_RANGE_UI, 1)
+        .setTooltip(
+            "The desired absolute voxel size for all output VDBs\n\n"
+            "Larger voxels correspond to lower resolution.\n"));
+
+    // Voxel scale
+    parms.add(hutil::ParmFactory(PRM_FLT_J, "voxelscale", "Voxel Scale")
+        .setDefault(PRMoneDefaults)
+        .setRange(PRM_RANGE_RESTRICTED, 0.000001f, PRM_RANGE_UI, 1)
+        .setTooltip(
+            "The amount by which to scale the voxel size for each output VDB\n\n"
+            "Larger voxels correspond to lower resolution.\n"));
 
     // Toggle to apply transform to vector values
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "xformvectors", "Transform Vectors")
         .setDefault(PRMzeroDefaults)
-        .setHelpText(
-            "Apply the resampling transform to the voxel values of\n"
-            "vector-valued grids, in accordance with those grids'\n"
-            "Vector Type attributes.\n"));
+        .setTooltip(
+            "Apply the resampling transform to the voxel values of vector-valued VDBs,"
+            " in accordance with those VDBs'"
+            " [Vector Type|http://www.openvdb.org/documentation/doxygen/overview.html#secGrid]"
+            " attributes."));
 
     // Level set rebuild toggle
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "rebuild", "Rebuild SDF")
         .setDefault(PRMoneDefaults)
-        .setHelpText(
+        .setTooltip(
             "Transforming (especially scaling) a level set might invalidate\n"
             "signed distances, necessitating reconstruction of the SDF.\n\n"
-            "This option affects only level set grids, and it should\n"
+            "This option affects only level set volumes, and it should\n"
             "almost always be enabled."));
 
     // Prune toggle
     parms.add(hutil::ParmFactory(PRM_TOGGLE, "prune", "Prune Tolerance")
         .setDefault(PRMoneDefaults)
         .setTypeExtended(PRM_TYPE_TOGGLE_JOIN)
-        .setHelpText(
-            "Collapse regions of constant value in output grids.\n"
-            "Voxel values are considered equal if they differ\n"
-            "by less than the specified threshold."));
+        .setTooltip(
+            "Reduce the memory footprint of output VDBs that have"
+            " (sufficiently large) regions of voxels with the same value.\n\n"
+            "Voxel values are considered equal if they differ by less than"
+            " the specified threshold.\n\n"
+            "NOTE:\n"
+            "    Pruning affects only the memory usage of a grid.\n"
+            "    It does not remove voxels, apart from inactive voxels\n"
+            "    whose value is equal to the background."));
 
     // Pruning tolerance slider
     parms.add(hutil::ParmFactory(
         PRM_FLT_J, "tolerance", "Prune Tolerance")
         .setDefault(PRMzeroDefaults)
-        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 1));
+        .setRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 1)
+        .setDocumentation(nullptr));
 
     // Obsolete parameters
     hutil::ParmList obsoleteParms;
     obsoleteParms.add(hutil::ParmFactory(PRM_SEPARATOR, "sep2", "separator"));
     obsoleteParms.add(hutil::ParmFactory(PRM_SEPARATOR, "sep3", "separator"));
     obsoleteParms.add(hutil::ParmFactory(PRM_SEPARATOR, "sep4", "separator"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_STRING, "reference_grid", "Reference"));
+    obsoleteParms.add(hutil::ParmFactory(PRM_XYZ_J, "translate", "Translate")
+        .setDefault(PRMzeroDefaults)
+        .setVectorSize(3));
+    obsoleteParms.add(hutil::ParmFactory(PRM_XYZ_J, "rotate", "Rotate")
+        .setDefault(PRMzeroDefaults)
+        .setVectorSize(3));
+    obsoleteParms.add(hutil::ParmFactory(PRM_XYZ_J, "scale", "Scale")
+        .setDefault(PRMoneDefaults)
+        .setVectorSize(3));
+    obsoleteParms.add(hutil::ParmFactory(PRM_XYZ_J, "pivot", "Pivot")
+        .setDefault(PRMzeroDefaults)
+        .setVectorSize(3));
+    obsoleteParms.add(hutil::ParmFactory(PRM_FLT_J, "voxel_size", "Voxel Size")
+        .setDefault(PRMoneDefaults));
 
     // Register this operator.
     hvdb::OpenVDBOpFactory("OpenVDB Resample", SOP_OpenVDB_Resample::factory, parms, *table)
         .setObsoleteParms(obsoleteParms)
         .addInput("Source VDB grids to resample")
-        .addOptionalInput("Optional transform reference VDB grid");
+        .addOptionalInput("Optional transform reference VDB grid")
+#if VDB_COMPILABLE_SOP
+        .setVerb(SOP_NodeVerb::COOK_INPLACE, []() { return new SOP_OpenVDB_Resample::Cache; })
+#endif
+        .setDocumentation("\
+#icon: COMMON/openvdb\n\
+#tags: vdb\n\
+\n\
+\"\"\"Resample a VDB volume into a new orientation and/or voxel size.\"\"\"\n\
+\n\
+@overview\n\
+\n\
+This node resamples voxels from input VDBs into new VDBs (of the same type)\n\
+through a sampling transform that is either specified by user-supplied\n\
+translation, rotation, scale and pivot parameters or taken from\n\
+an optional reference VDB.\n\
+\n\
+@related\n\
+- [OpenVDB Combine|Node:sop/DW_OpenVDBCombine]\n\
+- [Node:sop/vdbresample]\n\
+- [Node:sop/xform]\n\
+\n\
+@examples\n\
+\n\
+See [openvdb.org|http://www.openvdb.org/download/] for source code\n\
+and usage examples.\n");
+}
+
+
+void
+SOP_OpenVDB_Resample::resolveObsoleteParms(PRM_ParmList* obsoleteParms)
+{
+    if (!obsoleteParms) return;
+
+    resolveRenamedParm(*obsoleteParms, "reference_grid", "reference");
+    resolveRenamedParm(*obsoleteParms, "voxel_size", "voxelsize");
+    resolveRenamedParm(*obsoleteParms, "translate", "t");
+    resolveRenamedParm(*obsoleteParms, "rotate", "r");
+    resolveRenamedParm(*obsoleteParms, "scale", "s");
+    resolveRenamedParm(*obsoleteParms, "pivot", "p");
+
+    // Delegate to the base class.
+    hvdb::SOP_NodeVDB::resolveObsoleteParms(obsoleteParms);
 }
 
 
@@ -216,18 +345,22 @@ SOP_OpenVDB_Resample::updateParmsFlags()
 {
     bool changed = false;
 
-    const int mode = evalInt("mode", 0, 0);
-    changed |= enableParm("translate", mode == MODE_PARMS);
-    changed |= enableParm("rotate", mode == MODE_PARMS);
-    changed |= enableParm("scale", mode == MODE_PARMS);
-    changed |= enableParm("pivot", mode == MODE_PARMS);
+    const auto mode = evalInt("mode", 0, 0);
+    changed |= enableParm("t", mode == MODE_PARMS);
+    changed |= enableParm("r", mode == MODE_PARMS);
+    changed |= enableParm("s", mode == MODE_PARMS);
+    changed |= enableParm("p", mode == MODE_PARMS);
     changed |= enableParm("xOrd", mode == MODE_PARMS);
     changed |= enableParm("rOrd", mode == MODE_PARMS);
     changed |= enableParm("xformvectors", mode == MODE_PARMS);
-    changed |= enableParm("reference_grid", mode == MODE_REF_GRID);
-    changed |= enableParm("voxel_size", mode == MODE_VOXEL_SIZE);
+    changed |= enableParm("reference", mode == MODE_REF_GRID);
+    changed |= enableParm("voxelsize", mode == MODE_VOXEL_SIZE);
+    changed |= enableParm("voxelscale", mode == MODE_VOXEL_SCALE);
+    // Show either the voxel size or the voxel scale parm, but not both.
+    changed |= setVisibleState("voxelsize", mode != MODE_VOXEL_SCALE);
+    changed |= setVisibleState("voxelscale", mode == MODE_VOXEL_SCALE);
 
-    changed |= enableParm("tolerance", evalInt("prune", 0, 0));
+    changed |= enableParm("tolerance", bool(evalInt("prune", 0, 0)));
 
     return changed;
 }
@@ -252,17 +385,19 @@ SOP_OpenVDB_Resample::SOP_OpenVDB_Resample(OP_Network* net, const char* name, OP
 ////////////////////////////////////////
 
 
+namespace {
+
 // Helper class for use with UTvdbProcessTypedGrid()
-struct SOP_OpenVDB_Resample::RebuildOp
+struct RebuildOp
 {
-    SOP_OpenVDB_Resample* self;
+    std::function<void (const std::string&)> addWarning;
     openvdb::math::Transform xform;
     hvdb::GridPtr outGrid;
 
     template<typename GridT>
     void operator()(const GridT& grid)
     {
-        typedef typename GridT::ValueType ValueT;
+        using ValueT = typename GridT::ValueType;
 
         const ValueT halfWidth = ValueT(grid.background() * (1.0 / grid.voxelSize()[0]));
 
@@ -272,15 +407,13 @@ struct SOP_OpenVDB_Resample::RebuildOp
                 /*isovalue=*/openvdb::zeroVal<ValueT>(),
                 /*exWidth=*/halfWidth, /*inWidth=*/halfWidth, &xform, &interrupter);
         } catch (openvdb::TypeError&) {
-            self->addWarning(SOP_MESSAGE, ("skipped rebuild of level set grid "
-                + grid.getName() + " of type " + grid.type()).c_str());
-            outGrid = grid.copy();
+            addWarning("skipped rebuild of level set grid " + grid.getName()
+                + " of type " + grid.type());
+            outGrid = openvdb::ConstPtrCast<GridT>(grid.copy());
         }
     }
 }; // struct RebuildOp
 
-
-namespace {
 
 // Functor for use with UTvdbProcessTypedGridVec3() to apply a transform
 // to the voxel values of vector-valued grids
@@ -301,54 +434,58 @@ struct VecXformOp
 
 
 OP_ERROR
-SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
+VDB_NODE_OR_CACHE(VDB_COMPILABLE_SOP, SOP_OpenVDB_Resample)::cookVDBSop(OP_Context& context)
 {
     try {
+#if !VDB_COMPILABLE_SOP
         hutil::ScopedInputLock lock(*this, context);
-
-        const fpreal time = context.getTime();
-
         // This does a shallow copy of VDB grids and deep copy of native Houdini primitives.
         duplicateSource(0, context);
+#endif
+
+        auto addWarningCB = [this](const std::string& s) { addWarning(SOP_MESSAGE, s.c_str()); };
+
+        const fpreal time = context.getTime();
 
         const GU_Detail* refGdp = inputGeo(1, context);
 
         // Get parameters.
-        const int samplingOrder = evalInt("order", 0, time);
+        const int samplingOrder = static_cast<int>(evalInt("order", 0, time));
         if (samplingOrder < 0 || samplingOrder > 2) {
-            std::stringstream ss;
-            ss << "expected interpolation order between 0 and 2, got "<< samplingOrder;
-            throw std::runtime_error(ss.str().c_str());
+            throw std::runtime_error{"expected interpolation order between 0 and 2, got "
+                + std::to_string(samplingOrder)};
         }
 
-        UT_String xformOrder, rotOrder;
-        evalString(xformOrder, "xOrd", 0, time);
-        evalString(rotOrder, "rOrd", 0, time);
+        char const* const xOrdMenu[] = { "srt", "str", "rst", "rts", "tsr", "trs" };
+        char const* const rOrdMenu[] = { "xyz", "xzy", "yxz", "yzx", "zxy", "zyx" };
+        const UT_String
+            xformOrder = xOrdMenu[evalInt("xOrd", 0, time)],
+            rotOrder = rOrdMenu[evalInt("rOrd", 0, time)];
 
-        const int mode = evalInt("mode", 0, time);
-        if (mode < MODE_PARMS || mode > MODE_VOXEL_SIZE) {
-            std::stringstream ss;
-            ss << "expected mode 0, 1 or 2, got "<< mode;
-            throw std::runtime_error(ss.str().c_str());
+        const int mode = static_cast<int>(evalInt("mode", 0, time));
+        if (mode < MODE_PARMS || mode > MODE_VOXEL_SCALE) {
+            throw std::runtime_error{"expected mode between " + std::to_string(int(MODE_PARMS))
+                + " and " + std::to_string(int(MODE_VOXEL_SCALE))
+                + ", got " + std::to_string(mode)};
         }
 
         const openvdb::Vec3R
-            translate = SOP_NodeVDB::evalVec3R("translate", time),
-            rotate = (M_PI / 180.0) * SOP_NodeVDB::evalVec3R("rotate", time),
-            scale = SOP_NodeVDB::evalVec3R("scale", time),
-            pivot = SOP_NodeVDB::evalVec3R("pivot", time);
-        const float voxelSize = evalFloat("voxel_size", 0, time);
+            translate = evalVec3R("t", time),
+            rotate = (M_PI / 180.0) * evalVec3R("r", time),
+            scale = evalVec3R("s", time),
+            pivot = evalVec3R("p", time);
+        const float
+            voxelSize = static_cast<float>(evalFloat("voxelsize", 0, time)),
+            voxelScale = static_cast<float>(evalFloat("voxelscale", 0, time));
 
         const bool
             prune = evalInt("prune", 0, time),
             rebuild = evalInt("rebuild", 0, time),
             xformVec = evalInt("xformvectors", 0, time);
-        const float tolerance = evalFloat("tolerance", 0, time);
+        const float tolerance = static_cast<float>(evalFloat("tolerance", 0, time));
 
         // Get the group of grids to be resampled.
-        UT_String groupStr;
-        evalString(groupStr, "group", 0, time);
-        const GA_PrimitiveGroup* group = matchGroup(*gdp, groupStr.toStdString());
+        const GA_PrimitiveGroup* group = matchGroup(*gdp, evalStdString("group", time));
 
         hvdb::GridCPtr refGrid;
         if (mode == MODE_VOXEL_SIZE) {
@@ -357,18 +494,19 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
             hvdb::GridPtr grid = openvdb::FloatGrid::create();
             grid->setTransform(openvdb::math::Transform::createLinearTransform(voxelSize));
             refGrid = grid;
+        } else if (mode == MODE_VOXEL_SCALE) {
+            // Create a dummy reference grid with a default (linear) transform.
+            refGrid = openvdb::FloatGrid::create();
         } else if (mode == MODE_REF_GRID) {
             // Get the (optional) reference grid.
-            UT_String refGroupStr;
-            evalString(refGroupStr, "reference_grid", 0, time);
-            const GA_PrimitiveGroup* refGroup = NULL;
-            if (refGdp == NULL) {
+            const GA_PrimitiveGroup* refGroup = nullptr;
+            if (refGdp == nullptr) {
                 // If the second input is unconnected, the reference_grid parameter
                 // specifies a reference grid from the first input.
                 refGdp = gdp;
             }
             if (refGdp) {
-                refGroup = matchGroup(*gdp, refGroupStr.toStdString());
+                refGroup = matchGroup(*gdp, evalStdString("reference", time));
                 hvdb::VdbPrimCIterator it(refGdp, refGroup);
                 if (it) {
                     refGrid = it->getConstGridPtr();
@@ -406,16 +544,19 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
             // Override the sampling order for boolean grids.
             int curOrder = samplingOrder;
             if (valueType == UT_VDB_BOOL && (samplingOrder != 0)) {
-                std::stringstream ss;
-                ss << "a boolean VDB grid can't be order-" << samplingOrder << " sampled;\n"
-                    << "using nearest neighbor sampling instead";
-                addWarning(SOP_MESSAGE, ss.str().c_str());
+                addWarning(SOP_MESSAGE,
+                    ("a boolean VDB grid can't be order-" + std::to_string(samplingOrder)
+                    + " sampled; using nearest neighbor sampling instead").c_str());
                 curOrder = 0;
             }
 
             // Create a new, empty output grid of the same type as the input grid
             // and with the same metadata.
+#if OPENVDB_ABI_VERSION_NUMBER <= 3
             hvdb::GridPtr outGrid = grid.copyGrid(/*tree=*/openvdb::CP_NEW);
+#else
+            hvdb::GridPtr outGrid = grid.copyGridWithNewTree();
+#endif
 
             UT_AutoInterrupt scopedInterrupt(
                 ("Resampling " + it.getPrimitiveName().toStdString()).c_str());
@@ -424,11 +565,17 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
                 // If a reference grid was provided, then after resampling, the
                 // output grid's transform will be the same as the reference grid's.
 
+                openvdb::math::Transform::Ptr refXform = refGrid->transform().copy();
+                if (mode == MODE_VOXEL_SCALE) {
+                    openvdb::Vec3d scaledVoxelSize = grid.voxelSize() * voxelScale;
+                    refXform->preScale(scaledVoxelSize);
+                }
+
                 if (isLevelSet && rebuild) {
                     // Use the level set rebuild tool to both resample and rebuild.
                     RebuildOp op;
-                    op.self = this;
-                    op.xform = refGrid->transform();
+                    op.addWarning = addWarningCB;
+                    op.xform = *refXform;
                     UTvdbProcessTypedGridReal(valueType, grid, op);
                     outGrid = op.outGrid;
 
@@ -436,18 +583,26 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
                     // Use the resample tool to sample the input grid into the output grid.
 
                     // Set the correct transform on the output grid.
-                    outGrid->setTransform(refGrid->transform().copy());
+                    outGrid->setTransform(refXform);
 
-                    if (samplingOrder == 0) {
+                    if (curOrder == 0) {
                         hvdb::GridResampleToMatchOp<openvdb::tools::PointSampler> op(outGrid);
                         GEOvdbProcessTypedGridTopology(*vdb, op);
-                    } else if (samplingOrder == 1) {
+                    } else if (curOrder == 1) {
                         hvdb::GridResampleToMatchOp<openvdb::tools::BoxSampler> op(outGrid);
                         GEOvdbProcessTypedGridTopology(*vdb, op);
-                    } else if (samplingOrder == 2) {
+                    } else if (curOrder == 2) {
                         hvdb::GridResampleToMatchOp<openvdb::tools::QuadraticSampler> op(outGrid);
                         GEOvdbProcessTypedGridTopology(*vdb, op);
                     }
+
+#ifdef SESI_OPENVDB
+                    if (isLevelSet) {
+                        auto tempgrid = UTvdbGridCast<openvdb::FloatGrid>(outGrid);
+                        openvdb::tools::pruneLevelSet(tempgrid->tree());
+                        openvdb::tools::signedFloodFill(tempgrid->tree());
+                    }
+#endif
                 }
 
             } else {
@@ -460,7 +615,7 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
                 if (isLevelSet && rebuild) {
                     // Use the level set rebuild tool to both resample and rebuild.
                     RebuildOp op;
-                    op.self = this;
+                    op.addWarning = addWarningCB;
 
                     // Compose the input grid's transform with the user-supplied transform.
                     // (The latter is retrieved from the GridTransformer, so that the
@@ -478,16 +633,24 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
                     hvdb::Interrupter interrupter;
                     xform.setInterrupter(interrupter);
 
-                    if (samplingOrder == 0) {
+                    if (curOrder == 0) {
                         hvdb::GridTransformOp<openvdb::tools::PointSampler> op(outGrid, xform);
                         GEOvdbProcessTypedGridTopology(*vdb, op);
-                    } else if (samplingOrder == 1) {
+                    } else if (curOrder == 1) {
                         hvdb::GridTransformOp<openvdb::tools::BoxSampler> op(outGrid, xform);
                         GEOvdbProcessTypedGridTopology(*vdb, op);
-                    } else if (samplingOrder == 2) {
+                    } else if (curOrder == 2) {
                         hvdb::GridTransformOp<openvdb::tools::QuadraticSampler> op(outGrid, xform);
                         GEOvdbProcessTypedGridTopology(*vdb, op);
                     }
+
+#ifdef SESI_OPENVDB
+                    if (isLevelSet) {
+                        auto tempgrid = UTvdbGridCast<openvdb::FloatGrid>(outGrid);
+                        openvdb::tools::pruneLevelSet(tempgrid->tree());
+                        openvdb::tools::signedFloodFill(tempgrid->tree());
+                    }
+#endif
                 }
 
                 if (xformVec && outGrid->isInWorldSpace()
@@ -512,6 +675,6 @@ SOP_OpenVDB_Resample::cookMySop(OP_Context& context)
     return error();
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

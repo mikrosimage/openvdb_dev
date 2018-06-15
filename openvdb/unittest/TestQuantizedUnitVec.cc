@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -120,7 +120,7 @@ TestQuantizedUnitVec::testQuantization()
     //
     // Check conversion error
     //
-    const double tol = 0.015; // component error tolerance
+    const double tol = 0.05; // component error tolerance
 
     const int numNormals = 40000;
 
@@ -154,11 +154,11 @@ TestQuantizedUnitVec::testQuantization()
             n0[1] = float(std::sin(theta)*std::sin(phi));
             n0[2] = float(std::cos(theta));
 
-            CPPUNIT_ASSERT_DOUBLES_EQUAL(n0.length(), 1.0, 1e-6);
+            CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0, n0.length(), 1e-6);
 
             n1 = QuantizedUnitVec::unpack(QuantizedUnitVec::pack(n0));
 
-            CPPUNIT_ASSERT_DOUBLES_EQUAL(n1.length(), 1.0, 1e-6);
+            CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0, n1.length(), 1e-6);
 
             CPPUNIT_ASSERT_DOUBLES_EQUAL(n0[0], n1[0], tol);
             CPPUNIT_ASSERT_DOUBLES_EQUAL(n0[1], n1[1], tol);
@@ -172,6 +172,6 @@ TestQuantizedUnitVec::testQuantization()
     }
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

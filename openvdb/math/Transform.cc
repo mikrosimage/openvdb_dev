@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -46,7 +46,7 @@ namespace math {
 
 
 Transform::Transform(const MapBase::Ptr& map):
-    mMap(boost::const_pointer_cast</*to=*/MapBase, /*from=*/const MapBase>(map))
+    mMap(ConstPtrCast</*to=*/MapBase, /*from=*/const MapBase>(map))
 {
     // auto-convert to simplest type
     if (!mMap->isType<UniformScaleMap>() && mMap->isLinear()) {
@@ -56,7 +56,7 @@ Transform::Transform(const MapBase::Ptr& map):
 }
 
 Transform::Transform(const Transform& other):
-    mMap(boost::const_pointer_cast</*to=*/MapBase, /*from=*/const MapBase>(other.baseMap()))
+    mMap(ConstPtrCast</*to=*/MapBase, /*from=*/const MapBase>(other.baseMap()))
 {
 }
 
@@ -195,8 +195,8 @@ Transform::isIdentity() const
     if (mMap->isLinear()) {
         return mMap->getAffineMap()->isIdentity();
     } else if ( mMap->isType<NonlinearFrustumMap>() ) {
-        NonlinearFrustumMap::Ptr frustum
-            = boost::static_pointer_cast<NonlinearFrustumMap, MapBase>(mMap);
+        NonlinearFrustumMap::Ptr frustum =
+            StaticPtrCast<NonlinearFrustumMap, MapBase>(mMap);
         return frustum->isIdentity();
     }
     // unknown nonlinear map type
@@ -252,18 +252,20 @@ Transform::preMult(const Mat4d& m)
     } else if (mMap->isType<NonlinearFrustumMap>() ) {
 
         NonlinearFrustumMap::Ptr currentFrustum =
-            boost::static_pointer_cast<NonlinearFrustumMap, MapBase>(mMap);
+            StaticPtrCast<NonlinearFrustumMap, MapBase>(mMap);
 
         const Mat4d currentMat4 = currentFrustum->secondMap().getMat4();
         const Mat4d newMat4 = m * currentMat4;
 
-        AffineMap affine(newMat4);
+        AffineMap affine{newMat4};
 
-        NonlinearFrustumMap::Ptr frustum( new NonlinearFrustumMap( currentFrustum->getBBox(),
-                                                                   currentFrustum->getTaper(),
-                                                                   currentFrustum->getDepth(),
-                                                                   affine.copy() ) );
-        mMap = boost::static_pointer_cast<MapBase, NonlinearFrustumMap>( frustum );
+        NonlinearFrustumMap::Ptr frustum{new NonlinearFrustumMap{
+            currentFrustum->getBBox(),
+            currentFrustum->getTaper(),
+            currentFrustum->getDepth(),
+            affine.copy()
+        }};
+        mMap = StaticPtrCast<MapBase, NonlinearFrustumMap>(frustum);
     }
 
 }
@@ -316,24 +318,26 @@ Transform::postMult(const Mat4d& m)
         const Mat4d currentMat4 = mMap->getAffineMap()->getMat4();
         const Mat4d newMat4 = currentMat4 * m;
 
-        AffineMap::Ptr affineMap( new AffineMap( newMat4) );
+        AffineMap::Ptr affineMap{new AffineMap{newMat4}};
         mMap = simplify(affineMap);
 
-    } else if (mMap->isType<NonlinearFrustumMap>() ) {
+    } else if (mMap->isType<NonlinearFrustumMap>()) {
 
         NonlinearFrustumMap::Ptr currentFrustum =
-            boost::static_pointer_cast<NonlinearFrustumMap, MapBase>(mMap);
+            StaticPtrCast<NonlinearFrustumMap, MapBase>(mMap);
 
         const Mat4d currentMat4 = currentFrustum->secondMap().getMat4();
         const Mat4d newMat4 =  currentMat4 * m;
 
-        AffineMap affine(newMat4);
+        AffineMap affine{newMat4};
 
-        NonlinearFrustumMap::Ptr frustum( new NonlinearFrustumMap( currentFrustum->getBBox(),
-                                                                   currentFrustum->getTaper(),
-                                                                   currentFrustum->getDepth(),
-                                                                   affine.copy() ) );
-        mMap = boost::static_pointer_cast<MapBase, NonlinearFrustumMap>( frustum );
+        NonlinearFrustumMap::Ptr frustum{new NonlinearFrustumMap{
+            currentFrustum->getBBox(),
+            currentFrustum->getTaper(),
+            currentFrustum->getDepth(),
+            affine.copy()
+        }};
+        mMap = StaticPtrCast<MapBase, NonlinearFrustumMap>(frustum);
     }
 
 }
@@ -344,6 +348,71 @@ Transform::postMult(const Mat3d& m)
     Mat4d mat4 = Mat4d::identity();
     mat4.setMat3(m);
     postMult(mat4);
+}
+
+
+////////////////////////////////////////
+
+
+BBoxd
+Transform::indexToWorld(const CoordBBox& indexBBox) const
+{
+    return this->indexToWorld(BBoxd(indexBBox.min().asVec3d(), indexBBox.max().asVec3d()));
+}
+
+
+BBoxd
+Transform::indexToWorld(const BBoxd& indexBBox) const
+{
+    const Vec3d &imin = indexBBox.min(), &imax = indexBBox.max();
+
+    Vec3d corners[8];
+    corners[0] = imin;
+    corners[1] = Vec3d(imax(0), imin(1), imin(2));
+    corners[2] = Vec3d(imax(0), imax(1), imin(2));
+    corners[3] = Vec3d(imin(0), imax(1), imin(2));
+    corners[4] = Vec3d(imin(0), imin(1), imax(2));
+    corners[5] = Vec3d(imax(0), imin(1), imax(2));
+    corners[6] = imax;
+    corners[7] = Vec3d(imin(0), imax(1), imax(2));
+
+    BBoxd worldBBox;
+    Vec3d &wmin = worldBBox.min(), &wmax = worldBBox.max();
+
+    wmin = wmax = this->indexToWorld(corners[0]);
+    for (int i = 1; i < 8; ++i) {
+        Vec3d image = this->indexToWorld(corners[i]);
+        wmin = minComponent(wmin, image);
+        wmax = maxComponent(wmax, image);
+    }
+    return worldBBox;
+}
+
+
+BBoxd
+Transform::worldToIndex(const BBoxd& worldBBox) const
+{
+    Vec3d indexMin, indexMax;
+    calculateBounds(*this, worldBBox.min(), worldBBox.max(), indexMin, indexMax);
+    return BBoxd(indexMin, indexMax);
+}
+
+
+CoordBBox
+Transform::worldToIndexCellCentered(const BBoxd& worldBBox) const
+{
+    Vec3d indexMin, indexMax;
+    calculateBounds(*this, worldBBox.min(), worldBBox.max(), indexMin, indexMax);
+    return CoordBBox(Coord::round(indexMin), Coord::round(indexMax));
+}
+
+
+CoordBBox
+Transform::worldToIndexNodeCentered(const BBoxd& worldBBox) const
+{
+    Vec3d indexMin, indexMax;
+    calculateBounds(*this, worldBBox.min(), worldBBox.max(), indexMin, indexMax);
+    return CoordBBox(Coord::floor(indexMin), Coord::floor(indexMax));
 }
 
 
@@ -456,26 +525,27 @@ Transform::print(std::ostream& os, const std::string& indent) const
             linearRow.push_back(str);
         }
         w = std::max<size_t>(w, 30);
+        const int iw = int(w);
 
         // Print rows of the linear component matrix side-by-side with frustum parameters.
-        ostr << indent << std::left << std::setw(w) << "linear:"
+        ostr << indent << std::left << std::setw(iw) << "linear:"
             << "  frustum:\n";
-        ostr << indent << "   " << std::left << std::setw(w) << linearRow[0]
+        ostr << indent << "   " << std::left << std::setw(iw) << linearRow[0]
             << "  taper:  " << frustum.getTaper() << "\n";
-        ostr << indent << "   " << std::left << std::setw(w) << linearRow[1]
+        ostr << indent << "   " << std::left << std::setw(iw) << linearRow[1]
             << "  depth:  " << frustum.getDepth() << "\n";
 
         std::ostringstream ostmp;
-        ostmp << indent << "   " << std::left << std::setw(w) << linearRow[2]
+        ostmp << indent << "   " << std::left << std::setw(iw) << linearRow[2]
             << "  bounds: " << frustum.getBBox();
         if (ostmp.str().size() < 79) {
             ostr << ostmp.str() << "\n";
-            ostr << indent << "   " << std::left << std::setw(w) << linearRow[3] << "\n";
+            ostr << indent << "   " << std::left << std::setw(iw) << linearRow[3] << "\n";
         } else {
             // If the frustum bounding box doesn't fit on one line, split it into two lines.
-            ostr << indent << "   " << std::left << std::setw(w) << linearRow[2]
+            ostr << indent << "   " << std::left << std::setw(iw) << linearRow[2]
                 << "  bounds: " << frustum.getBBox().min() << " ->\n";
-            ostr << indent << "   " << std::left << std::setw(w) << linearRow[3]
+            ostr << indent << "   " << std::left << std::setw(iw) << linearRow[3]
                 << "             " << frustum.getBBox().max() << "\n";
         }
 
@@ -503,6 +573,6 @@ operator<<(std::ostream& os, const Transform& t)
 } // namespace OPENVDB_VERSION_NAME
 } // namespace openvdb
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

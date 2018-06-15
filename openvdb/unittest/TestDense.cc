@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -37,7 +37,7 @@
 #include <openvdb/Exceptions.h>
 #include <sstream>
 #ifdef BENCHMARK_TEST
-#include "util.h" // for CpuTimer
+#include <openvdb/util/CpuTimer.h>
 #endif
 
 
@@ -48,7 +48,7 @@ public:
 
     CPPUNIT_TEST(testDenseZYX);
     CPPUNIT_TEST(testDenseXYZ);
-    
+
     CPPUNIT_TEST(testCopyZYX);
     CPPUNIT_TEST(testCopyXYZ);
 
@@ -57,23 +57,23 @@ public:
 
     CPPUNIT_TEST(testCopyFromDenseWithOffsetZYX);
     CPPUNIT_TEST(testCopyFromDenseWithOffsetXYZ);
-    
+
     CPPUNIT_TEST(testDense2SparseZYX);
     CPPUNIT_TEST(testDense2SparseXYZ);
-    
+
     CPPUNIT_TEST(testDense2Sparse2ZYX);
     CPPUNIT_TEST(testDense2Sparse2XYZ);
-    
+
     CPPUNIT_TEST(testInvalidBBoxZYX);
     CPPUNIT_TEST(testInvalidBBoxXYZ);
-    
+
     CPPUNIT_TEST(testDense2Sparse2DenseZYX);
     CPPUNIT_TEST(testDense2Sparse2DenseXYZ);
     CPPUNIT_TEST_SUITE_END();
 
     void testDenseZYX();
     void testDenseXYZ();
-    
+
     template <openvdb::tools::MemoryLayout Layout>
     void testCopy();
     void testCopyZYX() { this->testCopy<openvdb::tools::LayoutZYX>(); }
@@ -124,8 +124,25 @@ TestDense::testDenseZYX()
                                   openvdb::Coord(-11, 7,22));
     openvdb::tools::Dense<float> dense(bbox);//LayoutZYX is the default
 
+    // Check Desne::origin()
+    CPPUNIT_ASSERT(openvdb::Coord(-40,-5, 6) == dense.origin());
+    
+    // Check coordToOffset and offsetToCoord
+    size_t offset = 0;
+    for (openvdb::Coord P(bbox.min()); P[0] <= bbox.max()[0]; ++P[0]) {
+        for (P[1] = bbox.min()[1]; P[1] <= bbox.max()[1]; ++P[1]) {
+            for (P[2] = bbox.min()[2]; P[2] <= bbox.max()[2]; ++P[2]) {
+                //std::cerr << "offset = " << offset << " P = " << P << std::endl;
+                CPPUNIT_ASSERT_EQUAL(offset, dense.coordToOffset(P));
+                CPPUNIT_ASSERT_EQUAL(P - dense.origin(), dense.offsetToLocalCoord(offset));
+                CPPUNIT_ASSERT_EQUAL(P, dense.offsetToCoord(offset));
+                ++offset;
+            }
+        }
+    }
+    
     // Check Dense::valueCount
-    const int size = dense.valueCount();
+    const int size = static_cast<int>(dense.valueCount());
     CPPUNIT_ASSERT_EQUAL(30*13*17, size);
 
     // Check Dense::fill(float) and Dense::getValue(size_t)
@@ -183,8 +200,25 @@ TestDense::testDenseXYZ()
                                   openvdb::Coord(-11, 7,22));
     openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> dense(bbox);
 
+    // Check Desne::origin()
+    CPPUNIT_ASSERT(openvdb::Coord(-40,-5, 6) == dense.origin());
+        
+    // Check coordToOffset and offsetToCoord
+    size_t offset = 0;
+    for (openvdb::Coord P(bbox.min()); P[2] <= bbox.max()[2]; ++P[2]) {
+        for (P[1] = bbox.min()[1]; P[1] <= bbox.max()[1]; ++P[1]) {
+            for (P[0] = bbox.min()[0]; P[0] <= bbox.max()[0]; ++P[0]) {            
+                //std::cerr << "offset = " << offset << " P = " << P << std::endl;
+                CPPUNIT_ASSERT_EQUAL(offset, dense.coordToOffset(P));
+                CPPUNIT_ASSERT_EQUAL(P - dense.origin(), dense.offsetToLocalCoord(offset));
+                CPPUNIT_ASSERT_EQUAL(P, dense.offsetToCoord(offset));
+                ++offset;
+            }
+        }
+    }
+    
     // Check Dense::valueCount
-    const int size = dense.valueCount();
+    const int size = static_cast<int>(dense.valueCount());
     CPPUNIT_ASSERT_EQUAL(30*13*17, size);
 
     // Check Dense::fill(float) and Dense::getValue(size_t)
@@ -291,11 +325,11 @@ void
 TestDense::testCopy()
 {
     using namespace openvdb;
-    
+
     //std::cerr << "\nTesting testCopy with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
-    
+
     typedef tools::Dense<float, Layout> DenseT;
     CheckDense<FloatTree, DenseT> checkDense;
     const float radius = 10.0f, tolerance = 0.00001f;
@@ -327,7 +361,7 @@ TestDense::testCopy()
 
     {// parallel convert to dense
 #ifdef BENCHMARK_TEST
-        unittest_util::CpuTimer ts;
+        util::CpuTimer ts;
         ts.start("CopyToDense");
 #endif
         tools::copyToDense(*grid, dense);
@@ -340,7 +374,7 @@ TestDense::testCopy()
 
     {// Parallel create from dense
 #ifdef BENCHMARK_TEST
-        unittest_util::CpuTimer ts;
+        util::CpuTimer ts;
         ts.start("CopyFromDense");
 #endif
         FloatTree tree1(tree0.background());
@@ -358,7 +392,7 @@ void
 TestDense::testCopyBool()
 {
     using namespace openvdb;
-    
+
     //std::cerr << "\nTesting testCopyBool with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
@@ -422,11 +456,11 @@ void
 TestDense::testCopyFromDenseWithOffset()
 {
     using namespace openvdb;
-    
+
     //std::cerr << "\nTesting testCopyFromDenseWithOffset with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
-   
+
     typedef openvdb::tools::Dense<float, Layout> DenseT;
 
     const int DIM = 20, COUNT = DIM * DIM * DIM;
@@ -468,17 +502,15 @@ TestDense::testDense2Sparse()
 {
     // The following test revealed a bug in v2.0.0b2
     using namespace openvdb;
-    
+
     //std::cerr << "\nTesting testDense2Sparse with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
-   
+
     typedef tools::Dense<float, Layout> DenseT;
 
     // Test Domain Resolution
-    size_t sizeX = 8;
-    size_t sizeY = 8;
-    size_t sizeZ = 9;
+    Int32 sizeX = 8, sizeY = 8, sizeZ = 9;
 
     // Define a dense grid
     DenseT dense(Coord(sizeX, sizeY, sizeZ));
@@ -486,7 +518,7 @@ TestDense::testDense2Sparse()
     // std::cerr <<  "\nDense bbox" << bboxD << std::endl;
 
     // Verify that the CoordBBox is truely used as [inclusive, inclusive]
-    CPPUNIT_ASSERT(dense.valueCount() == sizeX * sizeY * sizeZ );
+    CPPUNIT_ASSERT(int(dense.valueCount()) == int(sizeX * sizeY * sizeZ));
 
     // Fill the dense grid with constant value 1.
     dense.fill(1.0f);
@@ -505,7 +537,7 @@ TestDense::testDense2Sparse()
     gridS->evalMinMax(minS, maxS);
     gridP->evalMinMax(minP, maxP);
 
-    const float tolerance = 0.0001;
+    const float tolerance = 0.0001f;
 
     CPPUNIT_ASSERT_DOUBLES_EQUAL(minS, minP, tolerance);
     CPPUNIT_ASSERT_DOUBLES_EQUAL(maxS, maxP, tolerance);
@@ -585,17 +617,15 @@ TestDense::testDense2Sparse2()
     // existing values outside the bbox of the dense grid.
 
     using namespace openvdb;
-    
+
     //std::cerr << "\nTesting testDense2Sparse2 with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
-   
+
     typedef tools::Dense<float, Layout> DenseT;
 
     // Test Domain Resolution
-    size_t sizeX = 8;
-    size_t sizeY = 8;
-    size_t sizeZ = 9;
+    const int sizeX = 8, sizeY = 8, sizeZ = 9;
     const Coord magicVoxel(sizeX, sizeY, sizeZ);
 
     // Define a dense grid
@@ -604,7 +634,7 @@ TestDense::testDense2Sparse2()
     //std::cerr <<  "\nDense bbox" << bboxD << std::endl;
 
     // Verify that the CoordBBox is truely used as [inclusive, inclusive]
-    CPPUNIT_ASSERT(dense.valueCount() == sizeX * sizeY * sizeZ );
+    CPPUNIT_ASSERT_EQUAL(sizeX * sizeY * sizeZ, static_cast<int>(dense.valueCount()));
 
     // Fill the dense grid with constant value 1.
     dense.fill(1.0f);
@@ -625,7 +655,7 @@ TestDense::testDense2Sparse2()
     gridS->evalMinMax(minS, maxS);
     gridP->evalMinMax(minP, maxP);
 
-    const float tolerance = 0.0001;
+    const float tolerance = 0.0001f;
 
     CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0f, minP, tolerance);
     CPPUNIT_ASSERT_DOUBLES_EQUAL(1.0f, minS, tolerance);
@@ -706,11 +736,11 @@ void
 TestDense::testInvalidBBox()
 {
     using namespace openvdb;
-    
+
     //std::cerr << "\nTesting testInvalidBBox with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
-   
+
     typedef tools::Dense<float, Layout> DenseT;
     const CoordBBox badBBox(Coord(1, 1, 1), Coord(-1, 2, 2));
 
@@ -727,9 +757,9 @@ TestDense::testDense2Sparse2Dense()
     //std::cerr << "\nTesting testDense2Sparse2Dense with "
     //          << (Layout == tools::LayoutXYZ ? "XYZ" : "ZYX") << " memory layout"
     //          << std::endl;
-   
+
     typedef tools::Dense<float, Layout> DenseT;
-    
+
     const CoordBBox bboxBig(Coord(-12, 7, -32), Coord(12, 14, -15));
     const CoordBBox bboxSmall(Coord(-10, 8, -31), Coord(10, 12, -20));
 
@@ -749,17 +779,17 @@ TestDense::testDense2Sparse2Dense()
     DenseT denseSmall(bboxSmall, 0.f);
     {
         // insert non-const values
-        const int n = denseSmall.valueCount();
+        const int n = static_cast<int>(denseSmall.valueCount());
         float* d = denseSmall.data();
-        for (int i = 0; i < n; ++i) { d[i] = i; }
+        for (int i = 0; i < n; ++i) { d[i] = static_cast<float>(i); }
     }
     // Construct large dense grid
     DenseT denseBig(bboxBig, 0.f);
     {
         // insert non-const values
-        const int n = denseBig.valueCount();
+        const int n = static_cast<int>(denseBig.valueCount());
         float* d = denseBig.data();
-        for (int i = 0; i < n; ++i) { d[i] = i; }
+        for (int i = 0; i < n; ++i) { d[i] = static_cast<float>(i); }
     }
 
     // Make a sparse grid to copy this data into
@@ -833,6 +863,6 @@ TestDense::testDense2Sparse2Dense()
 }
 #undef BENCHMARK_TEST
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

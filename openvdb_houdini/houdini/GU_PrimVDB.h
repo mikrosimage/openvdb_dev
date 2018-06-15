@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -64,7 +64,9 @@ using ::GU_PrimVDB;
 #include <GA/GA_PrimitiveDefinition.h>
 #include "GEO_PrimVDB.h"
 #include <GU/GU_Detail.h>
+#if (UT_VERSION_INT < 0x0d050000) // Earlier than 13.5
 #include <GU/GU_Prim.h>
+#endif
 #include <UT/UT_Matrix4.h>
 #include <UT/UT_VoxelArray.h>
 #include <openvdb/Platform.h>
@@ -74,9 +76,16 @@ using ::GU_PrimVDB;
 class GA_Attribute;
 class GEO_PrimVolume;
 class UT_MemoryCounter;
+#if (UT_VERSION_INT >= 0x0d050000) // 13.5 or later
+class GEO_ConvertParms;
+typedef GEO_ConvertParms GU_ConvertParms;
+#endif
 
 
-class OPENVDB_HOUDINI_API GU_PrimVDB : public GEO_PrimVDB, public GU_Primitive
+class GU_API GU_PrimVDB : public GEO_PrimVDB
+#if (UT_VERSION_INT < 0x0d050000) // Earlier than 13.5
+    , public GU_Primitive
+#endif
 {
 protected:
     /// NOTE: Primitives should not be deleted directly.  They are managed
@@ -87,18 +96,23 @@ public:
     /// NOTE: This constructor should only be called via GU_PrimitiveFactory.
     GU_PrimVDB(GU_Detail *gdp, GA_Offset offset=GA_INVALID_OFFSET)
         : GEO_PrimVDB(gdp, offset)
-        , GU_Primitive()
     {}
 
+#if UT_VERSION_INT < 0x1000011F // earlier than 16.0.287
     /// NOTE: This constructor should only be called via GU_PrimitiveFactory.
     GU_PrimVDB(const GA_MergeMap &map, GA_Detail &detail,
                GA_Offset offset, const GU_PrimVDB &src_prim)
         : GEO_PrimVDB(map, detail, offset, src_prim)
-        , GU_Primitive()
     {}
+#endif
 
     /// Report approximate memory usage.
     virtual int64 getMemoryUsage() const;
+
+    /// Count memory usage using a UT_MemoryCounter in order to count
+    /// shared memory correctly.
+    /// NOTE: This should always include sizeof(*this).
+    virtual void countMemory(UT_MemoryCounter &counter) const;
 
 #ifndef SESI_OPENVDB
     /// Allows you to find out what this primitive type was named.
@@ -131,7 +145,8 @@ public:
 					bool flood_sdf,
 					bool prune,
 					fpreal tolerance,
-					bool keep_original);
+					bool keep_original,
+					bool activate_inside = true);
 
     /// Convert all GEO_PrimVDB primitives in geometry to parms.toType,
     /// preserving prim/vertex/point attributes (and prim/point groups if
@@ -152,8 +167,10 @@ public:
 					bool split_disjoint_volumes);
     /// @}
 
+#if (UT_VERSION_INT < 0x0d050000) // Earlier than 13.5
     virtual void		*castTo (void) const;
     virtual const GEO_Primitive	*castToGeo(void) const;
+#endif
 
     // NOTE:  For static member functions please call in the following
     //        manner.  <ptrvalue> = GU_PrimVDB::<functname>
@@ -183,7 +200,8 @@ public:
 			    const char *name,
 			    const bool flood_sdf = false,
 			    const bool prune = false,
-			    const float tolerance = 0.0);
+			    const float tolerance = 0.0,
+			    const bool activate_inside_sdf = true);
 
     /// A fast method for converting a primitive volume to a polysoup via VDB
     /// into the given gdp. It will _not_ copy attributes because this is a
@@ -194,20 +212,24 @@ public:
 
     virtual void	normal(NormalComp &output) const;
 
+#if (UT_VERSION_INT < 0x0d050000) // Earlier than 13.5
     virtual int		intersectRay(const UT_Vector3 &o, const UT_Vector3 &d,
 				float tmax = 1E17F, float tol = 1E-12F,
 				float *distance = 0, UT_Vector3 *pos = 0,
 				UT_Vector3 *nml = 0, int accurate = 0,
 				float *u = 0, float *v = 0,
 				int ignoretrim = 1) const;
+#endif
 
     // callermustdelete is true if the returned cache is to be deleted by
     // the caller.
+#if (UT_VERSION_INT < 0x0d050000) // Earlier than 13.5
+
 #if (UT_VERSION_INT >= 0x0d000000) // 13.0 or later
     SYS_DEPRECATED_HDK(13.0)
 #endif
     virtual GU_RayIntersect	*createRayCache(int &callermustdelete);
-
+#endif
 
     /// @brief Transfer any metadata associated with this primitive's
     /// VDB grid to primitive attributes.
@@ -219,11 +241,26 @@ public:
     /// @param grid  the grid whose metadata should be transferred
     /// @param gdp   the detail to which to transfer attributes
     static void createGridAttrsFromMetadata(
-	const GEO_PrimVDB& prim,
-	const openvdb::GridBase& grid,
-	GEO_Detail& gdp)
+        const GEO_PrimVDB& prim,
+        const openvdb::GridBase& grid,
+        GEO_Detail& gdp)
     {
-	GU_PrimVDB::createGridAttrsFromMetadataAdapter(prim, &grid, gdp);
+        GU_PrimVDB::createGridAttrsFromMetadataAdapter(prim, &grid, gdp);
+    }
+
+    /// @brief Transfer any metadata associated with the given MetaMap
+    /// to attributes on the given element specified by owner.
+    /// @param owner    the type of element
+    /// @param element  the offset of the element
+    /// @param meta_map the metadata that should be transferred
+    /// @param gdp      the detail to which to transfer attributes
+    static void createAttrsFromMetadata(
+        GA_AttributeOwner owner,
+        GA_Offset element,
+        const openvdb::MetaMap& meta_map,
+        GEO_Detail& gdp)
+    {
+        GU_PrimVDB::createAttrsFromMetadataAdapter(owner, element, &meta_map, gdp);
     }
 
     /// @brief Transfer a VDB primitive's attributes to a VDB grid as metadata.
@@ -231,11 +268,25 @@ public:
     /// @param prim  the primitive whose attributes should be transferred
     /// @param gdp   the detail from which to retrieve primitive attributes
     static void createMetadataFromGridAttrs(
-	openvdb::GridBase& grid,
-	const GEO_PrimVDB& prim,
-	const GEO_Detail& gdp)
+        openvdb::GridBase& grid,
+        const GEO_PrimVDB& prim,
+        const GEO_Detail& gdp)
     {
-	GU_PrimVDB::createMetadataFromGridAttrsAdapter(&grid, prim, gdp);
+        GU_PrimVDB::createMetadataFromGridAttrsAdapter(&grid, prim, gdp);
+    }
+
+    /// @brief Transfer attributes to VDB metadata.
+    /// @param meta_map  the output metadata
+    /// @param owner     the type of element
+    /// @param element   the offset of the element
+    /// @param geo       the detail from which to retrieve primitive attributes
+    static void createMetadataFromAttrs(
+        openvdb::MetaMap& meta_map,
+        GA_AttributeOwner owner,
+        GA_Offset element,
+        const GEO_Detail& geo)
+    {
+        GU_PrimVDB::createMetadataFromAttrsAdapter(&meta_map, owner, element, geo);
     }
 
 private: // METHODS
@@ -280,6 +331,18 @@ private: // METHODS
 			    const GEO_PrimVDB&,
 			    const GEO_Detail&);
 
+    static void createAttrsFromMetadataAdapter(
+        GA_AttributeOwner owner,
+        GA_Offset element,
+        const void* meta_map_ptr,
+        GEO_Detail& geo);
+
+    static void createMetadataFromAttrsAdapter(
+        void* meta_map_ptr,
+        GA_AttributeOwner owner,
+        GA_Offset element,
+        const GEO_Detail& geo);
+
 private: // DATA
 
     static GA_PrimitiveDefinition	*theDefinition;
@@ -303,6 +366,6 @@ using ::GU_PrimVDB;
 
 #endif // UT_VERSION_INT < 0x0c050157 // earlier than 12.5.343
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

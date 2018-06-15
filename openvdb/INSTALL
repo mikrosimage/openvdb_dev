@@ -3,18 +3,22 @@ Installing OpenVDB
 
 Requirements
 ------------
-- GNU GCC (gcc.gnu.org), version 4.1 or later
-  or Intel ICC (software.intel.com), version 11.1 or later
+- A C++11-compatible compiler, such as
+  GNU GCC (gcc.gnu.org), version 4.8 or later,
+  Clang (clang.llvm.org), version 3.8 or later,
+  or Intel ICC (software.intel.com), version 15 or later
 
 - GNU gmake (www.gnu.org/software/make/), version 3.81 or later
 
-- Boost (www.boost.org), version 1.42.0 or later
-  (Linux: yum install boost-devel; OS X: port install boost +python26)
+- Boost (www.boost.org), version 1.53.0 or later; 1.57.0 or later
+  for the Python module
+  (Linux: yum install boost-devel; OS X: port install boost +python27)
 
 - libz (zlib.net)
   (Linux: yum install zlib-devel)
 
 - OpenEXR (www.openexr.com), for the 16-bit float Half class in half.h
+  and for .exr file output in vdb_render
 
 - Intel Threading Building Blocks (threadingbuildingblocks.org),
   version 3.0 or later
@@ -24,18 +28,25 @@ Other compilers or versions might work but have not been tested.
 
 Optional:
 
-- Doxygen 1.8 (www.stack.nl/~dimitri/doxygen/)
+- Doxygen 1.8.11 or later (www.stack.nl/~dimitri/doxygen/), for documentation
 
 - CppUnit (www.freedesktop.org/wiki/Software/cppunit), version 1.10 or later
   (Linux: yum install cppunit-devel)
 
+- Houdini HDK (http://www.sidefx.com/get/download-houdini/), version 15.0
+  or later
+
+- Blosc compression library (www.blosc.org), version 1.5.0 or later
+  (included in the Houdini HDK as of version 14.0)
+
 - Ghostscript (www.ghostscript.com), version 8.70 or later, for documentation
   in PDF format
 
-- log4cplus (log4cplus.sourceforge.net), version 1.0 or later
-
 - pdfLaTeX (www.pdftex.org), version 1.21 or later, for documentation
   in PDF format
+
+- log4cplus (log4cplus.sourceforge.net), version 1.1.2 or later,
+  for error logging
 
 - GLFW 2.7 (www.glfw.org), for the OpenVDB viewer
 
@@ -61,20 +72,33 @@ Installation
 
     BOOST_INCL_DIR      the parent directory of the boost/ header directory
                         (e.g., /usr/include)
+    BOOST_LIB_DIR       the directory containing libboost_iostreams, etc.
+    BOOST_LIB           linker flags for libboost_iostreams and libboost_system
+    BOOST_THREAD_LIB    linker flags for libboost_thread
+
+    ILMBASE_INCL_DIR    the parent directory of the OpenEXR/ header directory
+                        (which contains half.h)
+    ILMBASE_LIB_DIR     the directory containing libHalf.so and/or libHalf.a
+    ILMBASE_LIB         linker flags for libIlmThread, libIex and libImath
+    HALF_LIB            linker flag(s) for the Half library (e.g., -lHalf)
 
     EXR_INCL_DIR        the parent directory of the OpenEXR/ header directory
-    EXR_LIB_DIR         the directory containing libIlmImf, etc.
-    EXR_LIB             linker flags for libIlmImf, libIlmThread, libIex
-                        and libImath
-
-    HALF_INCL_DIR       the parent directory of the OpenEXR/ header directory
-                        (which contains half.h)
-    HALF_LIB_DIR        the directory containing libHalf.so and/or libHalf.a
-    HALF_LIB            linker flag(s) for the Half library (e.g., -lHalf)
+                        (Note: some OpenEXR headers incorrectly include other
+                        OpenEXR headers with, e.g., '#include <ImfName.h>'
+                        instead of '#include "ImfName.h"'.  When compiling
+                        with Clang, set EXR_INCL_DIR to the parent directory
+                        of the OpenEXR/ directory and ILMBASE_INCL_DIR to the
+                        OpenEXR/ directory itself to avoid errors.)
+    EXR_LIB_DIR         the directory containing libIlmImf
+    EXR_LIB             linker flags for libIlmImf
 
     TBB_INCL_DIR        the parent directory of the tbb/ header directory
     TBB_LIB_DIR         the directory containing libtbb
     TBB_LIB             linker flag(s) for the TBB library (e.g., -ltbb)
+
+    BLOSC_INCL_DIR      the parent directory of the blosc.h header
+    BLOSC_LIB_DIR       the directory containing libblosc
+    BLOSC_LIB           linker flags for libblosc
 
     CONCURRENT_MALLOC_LIB_DIR
                         a directory containing a scalable, concurrent malloc
@@ -97,6 +121,9 @@ Installation
                         GLFW is needed only for the command-line viewer tool)
     GLFW_LIB_DIR        the directory containing libglfw
     GLFW_LIB            linker flags for the GLFW library (e.g., -lglfw)
+    GLFW_MAJOR_VERSION  the major version number of the GLFW library
+                        (header filenames changed between GLFW 2 and 3,
+                        so this must be specified explicitly)
 
     LOG4CPLUS_INCL_DIR  the parent directory of the log4cplus/ header directory
                         (leave blank if log4cplus is not available)
@@ -105,7 +132,7 @@ Installation
                         (e.g., -llog4cplus)
 
     PYTHON_VERSION      the version of Python for which to build the OpenVDB
-                        module (e.g., 2.6)
+                        module (e.g., 2.7)
                         (leave blank if Python is unavailable)
     PYTHON_INCL_DIR     the directory containing the Python.h header file
                         (on OS X, this is usually /System/Library/Frameworks/
@@ -116,7 +143,7 @@ Installation
                         (on OS X, this is usually /System/Library/Frameworks/
                         Python.framework/Versions/$(PYTHON_VERSION)/lib)
     PYTHON_LIB          linker flags for the Python library
-                        (e.g., -lpython2.6)
+                        (e.g., -lpython2.7)
     BOOST_PYTHON_LIB_DIR
                         the directory containing the Boost.Python library
     BOOST_PYTHON_LIB    linker flags for the Boost.Python library
@@ -139,18 +166,27 @@ Installation
     Note that if you plan to build the Houdini OpenVDB tools (distributed
     separately), you must build the OpenVDB library and the Houdini tools
     against compatible versions of the Boost, OpenEXR and TBB libraries.
-    Fortunately, all three are included in the Houdini HDK, so by default
+    Until Houdini 16.5, all three were included in the HDK, so by default
     several of the variables above reference the Houdini environment variables
     $HDSO, $HFS and $HT.  Source the houdini_setup script provided with
     your Houdini installation to set those environment variables.
+    As of Houdini 16.5, you must provide your own installation of Boost.
 
-    To build the OpenVDB Python module, you will need local installations of
-    Python, Boost.Python, and optionally NumPy.  As of Houdini 12.5, the HDK
-    includes versions 2.5 and 2.6 of Python as well as Boost.Python headers.
-    Unfortunately, it includes neither the libboost_python library nor NumPy,
-    so both Boost.Python and NumPy have to be built separately.
-    Point the variables $(BOOST_PYTHON_LIB_DIR), $(BOOST_PYTHON_LIB) and
-    $(NUMPY_INCL_DIR) to your local installations of those libraries.
+    Also note that certain new features in OpenVDB (see the CHANGES file
+    for details) necessitated changes to the ABI of the Grid class,
+    rendering it incompatible with earlier versions of the library, such as
+    the ones built into Houdini.  Passing grids between native VDB nodes
+    in a scene graph and nodes built against the new ABI will lead to crashes,
+    so to use OpenVDB with Houdini 15, 15.5 or 16, set abi=3 to compile
+    with the incompatible features disabled, and for Houdini 16.5 set abi=4.
+
+    To build the OpenVDB Python module, you will need local installations
+    of Python, Boost.Python, and optionally NumPy.  Houdini ships with
+    Python 2 but not with the libboost_python library or with NumPy or,
+    as of Houdini 16.5, with the Boost.Python headers, so both Boost.Python
+    and NumPy have to be built separately.  Point the variables
+    $(BOOST_PYTHON_LIB_DIR), $(BOOST_PYTHON_LIB) and $(NUMPY_INCL_DIR)
+    to your local installations of those libraries.
 
 2.  From the top-level openvdb/ directory, type "make" (or "make -s" for
     less verbose output) to locally build the library and commands.
@@ -159,8 +195,8 @@ Installation
     A default local build generates the following libraries and executables
     (but see the Makefile for additional targets and build options):
 
-    openvdb/libopenvdb.so.2.3.0         the OpenVDB library
-    openvdb/libopenvdb.so               symlink to libopenvdb.so.2.3.0
+    openvdb/libopenvdb.so.5.2.0         the OpenVDB library
+    openvdb/libopenvdb.so               symlink to libopenvdb.so.5.2.0
     openvdb/pyopenvdb.so                the OpenVDB Python module (if Python
                                         and Boost.Python are available)
     openvdb/vdb_print                   command-line tool that prints info
@@ -206,8 +242,8 @@ Installation
                 version.h
         lib/
             libopenvdb.so
-            libopenvdb.so.2.3
-            libopenvdb.so.2.3.0
+            libopenvdb.so.5.2
+            libopenvdb.so.5.2.0
 
         python/
             include/
@@ -216,7 +252,7 @@ Installation
             lib/
                 python$(PYTHON_VERSION)/
                     pyopenvdb.so
-                    pyopenvdb.so.2.3
+                    pyopenvdb.so.5.2
 
         share/
             doc/

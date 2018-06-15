@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -58,9 +58,16 @@ TestCoord::testCoord()
 {
     using openvdb::Coord;
 
+    for (int i=0; i<3; ++i) {
+        CPPUNIT_ASSERT_EQUAL(Coord::min()[i], std::numeric_limits<Coord::Int32>::min());
+        CPPUNIT_ASSERT_EQUAL(Coord::max()[i], std::numeric_limits<Coord::Int32>::max());
+    }
+
     Coord xyz(-1, 2, 4);
     Coord xyz2 = -xyz;
     CPPUNIT_ASSERT_EQUAL(Coord(1, -2, -4), xyz2);
+
+    CPPUNIT_ASSERT_EQUAL(Coord(1, 2, 4), openvdb::math::Abs(xyz));
 
     xyz2 = -xyz2;
     CPPUNIT_ASSERT_EQUAL(xyz, xyz2);
@@ -147,6 +154,13 @@ TestCoord::testCoordBBox()
         CPPUNIT_ASSERT_EQUAL(min, b.min());
         CPPUNIT_ASSERT_EQUAL(max, b.max());
     }
+    {// Construct bbox from components of min and max
+        const openvdb::Coord min(-1,-2,30), max(20,30,55);
+        openvdb::CoordBBox b(min[0], min[1], min[2],
+                             max[0], max[1], max[2]);
+        CPPUNIT_ASSERT_EQUAL(min, b.min());
+        CPPUNIT_ASSERT_EQUAL(max, b.max());
+    }
     {// tbb::split constructor
          const openvdb::Coord min(-1,-2,30), max(20,30,55);
          openvdb::CoordBBox a(min, max), b(a, tbb::split());
@@ -188,11 +202,11 @@ TestCoord::testCoordBBox()
         CPPUNIT_ASSERT_EQUAL(openvdb::Vec3d(3.5, 6.0, 9.0), b.getCenter());
     }
     {// a volume that overflows Int32.
-        typedef openvdb::Int32  Int32;
+        using Int32 = openvdb::Int32;
         Int32 maxInt32 = std::numeric_limits<Int32>::max();
         const openvdb::Coord min(Int32(0), Int32(0), Int32(0));
         const openvdb::Coord max(maxInt32-Int32(2), Int32(2), Int32(2));
-        
+
         const openvdb::CoordBBox b(min, max);
         uint64_t volume = UINT64_C(19327352814);
         CPPUNIT_ASSERT_EQUAL(volume, b.volume());
@@ -255,8 +269,99 @@ TestCoord::testCoordBBox()
         CPPUNIT_ASSERT(b.empty());
     }
 
+    {// ZYX Iterator 1
+        const openvdb::Coord min(-1,-2,3), max(2,3,5);
+        const openvdb::CoordBBox b(min, max);
+        const size_t count = b.volume();
+        size_t n = 0;
+        openvdb::CoordBBox::ZYXIterator ijk(b);
+        for (int i=min[0]; i<=max[0]; ++i) {
+            for (int j=min[1]; j<=max[1]; ++j) {
+                for (int k=min[2]; k<=max[2]; ++k, ++ijk, ++n) {
+                    CPPUNIT_ASSERT(ijk);
+                    CPPUNIT_ASSERT_EQUAL(openvdb::Coord(i,j,k), *ijk);
+                }
+            }
+        }
+        CPPUNIT_ASSERT_EQUAL(count, n);
+        CPPUNIT_ASSERT(!ijk);
+        ++ijk;
+        CPPUNIT_ASSERT(!ijk);
+    }
+
+    {// ZYX Iterator 2
+        const openvdb::Coord min(-1,-2,3), max(2,3,5);
+        const openvdb::CoordBBox b(min, max);
+        const size_t count = b.volume();
+        size_t n = 0;
+        openvdb::Coord::ValueType unused = 0;
+        for (const auto& ijk: b) {
+            unused += ijk[0];
+            CPPUNIT_ASSERT(++n <= count);
+        }
+        CPPUNIT_ASSERT_EQUAL(count, n);
+    }
+
+    {// XYZ Iterator 1
+        const openvdb::Coord min(-1,-2,3), max(2,3,5);
+        const openvdb::CoordBBox b(min, max);
+        const size_t count = b.volume();
+        size_t n = 0;
+        openvdb::CoordBBox::XYZIterator ijk(b);
+        for (int k=min[2]; k<=max[2]; ++k) {
+            for (int j=min[1]; j<=max[1]; ++j) {
+                for (int i=min[0]; i<=max[0]; ++i, ++ijk, ++n) {
+                    CPPUNIT_ASSERT( ijk );
+                    CPPUNIT_ASSERT_EQUAL( openvdb::Coord(i,j,k), *ijk );
+                }
+            }
+        }
+        CPPUNIT_ASSERT_EQUAL(count, n);
+        CPPUNIT_ASSERT( !ijk );
+        ++ijk;
+        CPPUNIT_ASSERT( !ijk );
+    }
+
+    {// XYZ Iterator 2
+        const openvdb::Coord min(-1,-2,3), max(2,3,5);
+        const openvdb::CoordBBox b(min, max);
+        const size_t count = b.volume();
+        size_t n = 0;
+        for (auto ijk = b.beginXYZ(); ijk; ++ijk) {
+            CPPUNIT_ASSERT( ++n <= count );
+        }
+        CPPUNIT_ASSERT_EQUAL(count, n);
+    }
+
+    {// bit-wise operations
+        const openvdb::Coord min(-1,-2,3), max(2,3,5);
+        const openvdb::CoordBBox b(min, max);
+        CPPUNIT_ASSERT_EQUAL(openvdb::CoordBBox(min>>1,max>>1), b>>size_t(1));
+        CPPUNIT_ASSERT_EQUAL(openvdb::CoordBBox(min>>3,max>>3), b>>size_t(3));
+        CPPUNIT_ASSERT_EQUAL(openvdb::CoordBBox(min<<1,max<<1), b<<size_t(1));
+        CPPUNIT_ASSERT_EQUAL(openvdb::CoordBBox(min&1,max&1), b&1);
+        CPPUNIT_ASSERT_EQUAL(openvdb::CoordBBox(min|1,max|1), b|1);
+    }
+
+    {// test getCornerPoints
+        const openvdb::CoordBBox bbox(1, 2, 3, 4, 5, 6);
+        openvdb::Coord a[10];
+        bbox.getCornerPoints(a);
+        //for (int i=0; i<8; ++i) {
+        //    std::cerr << "#"<<i<<" = ("<<a[i][0]<<","<<a[i][1]<<","<<a[i][2]<<")\n";
+        //}
+        CPPUNIT_ASSERT_EQUAL( a[0], openvdb::Coord(1, 2, 3) );
+        CPPUNIT_ASSERT_EQUAL( a[1], openvdb::Coord(1, 2, 6) );
+        CPPUNIT_ASSERT_EQUAL( a[2], openvdb::Coord(1, 5, 3) );
+        CPPUNIT_ASSERT_EQUAL( a[3], openvdb::Coord(1, 5, 6) );
+        CPPUNIT_ASSERT_EQUAL( a[4], openvdb::Coord(4, 2, 3) );
+        CPPUNIT_ASSERT_EQUAL( a[5], openvdb::Coord(4, 2, 6) );
+        CPPUNIT_ASSERT_EQUAL( a[6], openvdb::Coord(4, 5, 3) );
+        CPPUNIT_ASSERT_EQUAL( a[7], openvdb::Coord(4, 5, 6) );
+        for (int i=1; i<8; ++i) CPPUNIT_ASSERT( a[i-1] < a[i] );
+    }
 }
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

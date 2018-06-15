@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////
 //
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 //
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -33,6 +33,11 @@
 
 #include "SOP_NodeVDB.h"
 
+#include <houdini_utils/geometry.h>
+//#ifdef OPENVDB_ENABLE_POINTS
+#include <openvdb/points/PointDataGrid.h>
+#include "PointUtils.h"
+//#endif
 #include "Utils.h"
 #include "GEO_PrimVDB.h"
 #include "GU_PrimVDB.h"
@@ -41,18 +46,117 @@
 #include <OP/OP_NodeInfoParms.h>
 #include <PRM/PRM_Parm.h>
 #include <PRM/PRM_Type.h>
+#include <SOP/SOP_Cache.h> // for stealable
+#include <UT/UT_InfoTree.h>
+#include <UT/UT_SharedPtr.h>
+#include <tbb/mutex.h>
+#include <algorithm>
+#include <iostream>
+#include <map>
+#include <memory>
 #include <sstream>
+#include <stdexcept>
 
 
 namespace openvdb_houdini {
+
+namespace node_info_text {
+
+using Mutex = tbb::mutex;
+using Lock = Mutex::scoped_lock;
+// map of function callbacks to grid types
+using ApplyGridSpecificInfoTextMap = std::map<openvdb::Name, ApplyGridSpecificInfoText>;
+
+struct LockedInfoTextRegistry
+{
+    LockedInfoTextRegistry() {}
+    ~LockedInfoTextRegistry() {}
+
+    Mutex mMutex;
+    ApplyGridSpecificInfoTextMap mApplyGridSpecificInfoTextMap;
+};
+
+// Declare this at file scope to ensure thread-safe initialization
+static Mutex theInitInfoTextRegistryMutex;
+
+// Global function for accessing the regsitry
+static LockedInfoTextRegistry*
+getInfoTextRegistry()
+{
+    Lock lock(theInitInfoTextRegistryMutex);
+
+    static LockedInfoTextRegistry *registry = nullptr;
+
+    if (registry == nullptr) {
+#if defined(__ICC)
+__pragma(warning(disable:1711)) // disable ICC "assignment to static variable" warnings
+#endif
+        registry = new LockedInfoTextRegistry();
+#if defined(__ICC)
+__pragma(warning(default:1711))
+#endif
+    }
+
+    return registry;
+}
+
+
+void registerGridSpecificInfoText(const std::string&, ApplyGridSpecificInfoText);
+ApplyGridSpecificInfoText getGridSpecificInfoText(const std::string&);
+
+
+void
+registerGridSpecificInfoText(const std::string& gridType, ApplyGridSpecificInfoText callback)
+{
+    LockedInfoTextRegistry *registry = getInfoTextRegistry();
+    Lock lock(registry->mMutex);
+
+    if(registry->mApplyGridSpecificInfoTextMap.find(gridType) !=
+       registry->mApplyGridSpecificInfoTextMap.end()) return;
+
+    registry->mApplyGridSpecificInfoTextMap[gridType] = callback;
+}
+
+/// @brief Return a pointer to a grid information function, or @c nullptr
+///        if no specific function has been registered for the given grid type.
+/// @note The defaultNodeSpecificInfoText() method is always returned prior to Houdini 14.
+ApplyGridSpecificInfoText
+getGridSpecificInfoText(const std::string& gridType)
+{
+    LockedInfoTextRegistry *registry = getInfoTextRegistry();
+    Lock lock(registry->mMutex);
+
+    const ApplyGridSpecificInfoTextMap::const_iterator iter =
+        registry->mApplyGridSpecificInfoTextMap.find(gridType);
+
+    if (iter == registry->mApplyGridSpecificInfoTextMap.end() || iter->second == nullptr) {
+        return nullptr; // Native prim info is sufficient
+    }
+
+    return iter->second;
+}
+
+} // namespace node_info_text
+
+
+////////////////////////////////////////
+
 
 SOP_NodeVDB::SOP_NodeVDB(OP_Network* net, const char* name, OP_Operator* op):
     SOP_Node(net, name, op)
 {
 #ifndef SESI_OPENVDB
-    // Initialize the vdb library
+    // Initialize the OpenVDB library
     openvdb::initialize();
+    // Forward OpenVDB log messages to the UT_ErrorManager (for all SOPs).
+    startLogForwarding(SOP_OPTYPE_ID);
 #endif
+
+//#ifdef OPENVDB_ENABLE_POINTS
+    // Register grid-specific info text for Point Data Grids
+    node_info_text::registerGridSpecificInfoText<openvdb::points::PointDataGrid>(
+        &pointDataGridSpecificInfoText);
+//#endif
 
     // Set the flag to draw guide geometry
     mySopFlags.setNeedGuide1(true);
@@ -75,10 +179,25 @@ SOP_NodeVDB::matchGroup(GU_Detail& aGdp, const std::string& pattern)
     /// we usually copy input 0 to the output detail, so we can in effect
     /// match groups from input 0 by matching them in the output instead.
 
-    const GA_PrimitiveGroup* group = NULL;
+    const GA_PrimitiveGroup* group = nullptr;
     if (!pattern.empty()) {
         // If a pattern was provided, try to match it.
-        group = parsePrimitiveGroups(pattern.c_str(), &aGdp);
+        group = parsePrimitiveGroups(pattern.c_str(), GroupCreator(&aGdp, false));
+        if (!group) {
+            // Report an error if the pattern didn't match.
+            throw std::runtime_error(("Invalid group (" + pattern + ")").c_str());
+        }
+    }
+    return group;
+}
+
+const GA_PrimitiveGroup*
+SOP_NodeVDB::matchGroup(const GU_Detail& aGdp, const std::string& pattern)
+{
+    const GA_PrimitiveGroup* group = nullptr;
+    if (!pattern.empty()) {
+        // If a pattern was provided, try to match it.
+        group = parsePrimitiveGroups(pattern.c_str(), GroupCreator(&aGdp));
         if (!group) {
             // Report an error if the pattern didn't match.
             throw std::runtime_error(("Invalid group (" + pattern + ")").c_str());
@@ -89,6 +208,34 @@ SOP_NodeVDB::matchGroup(GU_Detail& aGdp, const std::string& pattern)
 
 
 ////////////////////////////////////////
+
+
+#if (UT_MAJOR_VERSION_INT < 16)
+void
+SOP_NodeVDB::fillInfoTreeNodeSpecific(UT_InfoTree& tree, fpreal time)
+{
+    SOP_Node::fillInfoTreeNodeSpecific(tree, time);
+
+    // Add the OpenVDB library version number to this node's
+    // extended operator information.
+    if (UT_InfoTree* child = tree.addChildBranch("OpenVDB")) {
+        child->addColumnHeading("version");
+        child->addProperties(openvdb::getLibraryVersionString());
+    }
+}
+#else
+void
+SOP_NodeVDB::fillInfoTreeNodeSpecific(UT_InfoTree& tree, const OP_NodeInfoTreeParms& parms)
+{
+    SOP_Node::fillInfoTreeNodeSpecific(tree, parms);
+
+    // Add the OpenVDB library version number to this node's
+    // extended operator information.
+    if (UT_InfoTree* child = tree.addChildMap("OpenVDB")) {
+        child->addProperties("OpenVDB Version", openvdb::getLibraryAbiVersionString());
+    }
+}
+#endif
 
 
 void
@@ -113,37 +260,161 @@ SOP_NodeVDB::getNodeSpecificInfoText(OP_Context &context, OP_NodeInfoParms &parm
     std::ostringstream infoStr;
 
     unsigned gridn = 0;
+
     for (VdbPrimCIterator it(tmp_gdp); it; ++it) {
 
         const openvdb::GridBase& grid = it->getGrid();
-        openvdb::Coord dim = grid.evalActiveVoxelDim();
-        const UT_String gridName = it.getPrimitiveName();
 
-        infoStr << "    ";
-        infoStr << "(" << it.getIndex() << ")";
-        if(gridName.isstring()) infoStr << " name: '" << gridName << "',";
-        infoStr << " voxel size: " << grid.transform().voxelSize()[0] << ",";
-        infoStr << " type: "<< grid.valueType() << ",";
+        node_info_text::ApplyGridSpecificInfoText callback =
+            node_info_text::getGridSpecificInfoText(grid.type());
+        if (callback) {
+            // Note, the output string stream for every new grid is initialized with
+            // its index and houdini primitive name prior to executing the callback
+            const UT_String gridName = it.getPrimitiveName();
 
-        if (grid.activeVoxelCount() != 0) {
-            infoStr << " dim: " << dim[0] << "x" << dim[1] << "x" << dim[2];
-        } else {
-            infoStr <<" <empty>";
+            infoStr << "  (" << it.getIndex() << ")";
+            if(gridName.isstring()) infoStr << " name: '" << gridName << "',";
+
+
+            (*callback)(infoStr, grid);
+
+            infoStr<<"\n";
+
+            ++gridn;
         }
-
-        infoStr<<"\n";
-
-        ++gridn;
     }
 
     if (gridn > 0) {
         std::ostringstream headStr;
-        headStr << gridn << " VDB grid" << (gridn == 1 ? "" : "s") << "\n";
+        headStr << gridn << " Custom VDB grid" << (gridn == 1 ? "" : "s") << "\n";
 
         parms.append(headStr.str().c_str());
         parms.append(infoStr.str().c_str());
     }
 #endif
+}
+
+
+////////////////////////////////////////
+
+
+OP_ERROR
+SOP_NodeVDB::duplicateSourceStealable(const unsigned index,
+    OP_Context& context, GU_Detail **pgdp, GU_DetailHandle& gdh, bool clean)
+{
+    // traverse upstream nodes, if unload is not possible, duplicate the source
+    if (!isSourceStealable(index, context)) {
+        duplicateSource(index, context, *pgdp, clean);
+        unlockInput(index);
+        return error();
+    }
+
+    // get the input GU_Detail handle and unlock the inputs
+    GU_DetailHandle inputgdh = inputGeoHandle(index);
+
+    unlockInput(index);
+    SOP_Node *input = CAST_SOPNODE(getInput(index));
+
+    if (!input) {
+        addError(SOP_MESSAGE, "Invalid input SOP Node when attempting to unload.");
+        return error();
+    }
+
+    // explicitly unload the data from the input SOP
+    const bool unloadSuccessful = input->unloadData();
+
+    // check if we only have one reference
+    const bool soleReference = (inputgdh.getRefCount() == 1);
+
+    // if the unload was unsuccessful or the reference count is not one, we fall back to
+    // explicitly copying the input onto the gdp
+    if (!(unloadSuccessful && soleReference)) {
+        const GU_Detail *src = inputgdh.readLock();
+        UT_ASSERT(src);
+        if (src)  (*pgdp)->copy(*src);
+        inputgdh.unlock(src);
+        return error();
+    }
+
+    // release our old write lock on gdp (setup by cookMe())
+    gdh.unlock(*pgdp);
+    // point to the input's old gdp and setup a write lock
+    gdh = inputgdh;
+    *pgdp = gdh.writeLock();
+
+    return error();
+}
+
+
+bool
+SOP_NodeVDB::isSourceStealable(const unsigned index, OP_Context& context) const
+{
+    struct Local {
+        static inline OP_Node* nextStealableInput(
+            const unsigned idx, const fpreal now, const OP_Node* node)
+        {
+            OP_Node* input = node->getInput(idx);
+            while (input) {
+                OP_Node* passThrough = input->getPassThroughNode(now);
+                if (!passThrough) break;
+                input = passThrough;
+            }
+            return input;
+        }
+    }; // struct Local
+
+    const fpreal now = context.getTime();
+
+    for (OP_Node* node = Local::nextStealableInput(index, now, this); node != nullptr;
+        node = Local::nextStealableInput(index, now, node))
+    {
+        // cont'd if it is a SOP_NULL.
+        std::string opname = node->getName().toStdString().substr(0, 4);
+        if (opname == "null") continue;
+
+        // if the SOP is a cache SOP we don't want to try and alter its data without a deep copy
+        if (dynamic_cast<SOP_Cache*>(node))  return false;
+
+        if (node->getUnload() != 0)
+            return true;
+        else
+            return false;
+    }
+    return false;
+}
+
+
+OP_ERROR
+SOP_NodeVDB::duplicateSourceStealable(const unsigned index, OP_Context& context)
+{
+    return this->duplicateSourceStealable(index, context, &gdp, myGdpHandle, true);
+}
+
+
+////////////////////////////////////////
+
+
+#if UT_MAJOR_VERSION_INT >= 16
+const SOP_NodeVerb*
+SOP_NodeVDB::cookVerb() const
+{
+    if (const auto* verb = SOP_NodeVerb::lookupVerb(getOperator()->getName())) {
+        return verb; ///< @todo consider caching this
+    }
+    return SOP_Node::cookVerb();
+}
+#endif
+
+
+OP_ERROR
+SOP_NodeVDB::cookMySop(OP_Context& context)
+{
+#if UT_MAJOR_VERSION_INT >= 16
+    if (cookVerb()) {
+        return cookMyselfAsVerb(context);
+    }
+#endif
+    return cookVDBSop(context);
 }
 
 
@@ -172,9 +443,9 @@ createEmptyGridGlyph(GU_Detail& gdp, GridCRef grid)
     lines[4] = xform.indexToWorld(lines[4]);
     lines[5] = xform.indexToWorld(lines[5]);
 
-    boost::shared_ptr<GU_Detail> tmpGDP(new GU_Detail);
+    UT_SharedPtr<GU_Detail> tmpGDP(new GU_Detail);
 
-    UT_Vector3 color(0.1, 1.0, 0.1);
+    UT_Vector3 color(0.1f, 1.0f, 0.1f);
     tmpGDP->addFloatTuple(GA_ATTRIB_POINT, "Cd", 3, GA_Defaults(color.data(), 3));
 
     GU_PrimPoly *poly;
@@ -183,10 +454,10 @@ createEmptyGridGlyph(GU_Detail& gdp, GridCRef grid)
         poly = GU_PrimPoly::build(&*tmpGDP, 2, GU_POLY_OPEN);
 
         tmpGDP->setPos3(poly->getPointOffset(i % 2),
-            UT_Vector3(lines[i][0], lines[i][1], lines[i][2]));
+            UT_Vector3(float(lines[i][0]), float(lines[i][1]), float(lines[i][2])));
 
         tmpGDP->setPos3(poly->getPointOffset(i % 2 + 1),
-            UT_Vector3(lines[i + 1][0], lines[i + 1][1], lines[i + 1][2]));
+            UT_Vector3(float(lines[i + 1][0]), float(lines[i + 1][1]), float(lines[i + 1][2])));
     }
 
     gdp.merge(*tmpGDP);
@@ -198,8 +469,9 @@ createEmptyGridGlyph(GU_Detail& gdp, GridCRef grid)
 OP_ERROR
 SOP_NodeVDB::cookMyGuide1(OP_Context& context)
 {
+#ifndef SESI_OPENVDB
     myGuide1->clearAndDestroy();
-    UT_Vector3 color(0.1, 0.1, 1.0);
+    UT_Vector3 color(0.1f, 0.1f, 1.0f);
     UT_Vector3 corners[8];
 
     // For each VDB primitive (with a non-null grid pointer) in the group...
@@ -210,8 +482,8 @@ SOP_NodeVDB::cookMyGuide1(OP_Context& context)
             createEmptyGridGlyph(*myGuide1, it->getGrid());
         }
     }
-
-    return error();
+#endif
+    return SOP_Node::cookMyGuide1(context);
 }
 
 
@@ -221,9 +493,9 @@ SOP_NodeVDB::cookMyGuide1(OP_Context& context)
 openvdb::Vec3f
 SOP_NodeVDB::evalVec3f(const char *name, fpreal time) const
 {
-    return openvdb::Vec3f(evalFloat(name, 0, time),
-                          evalFloat(name, 1, time),
-                          evalFloat(name, 2, time));
+    return openvdb::Vec3f(float(evalFloat(name, 0, time)),
+                          float(evalFloat(name, 1, time)),
+                          float(evalFloat(name, 2, time)));
 }
 
 openvdb::Vec3R
@@ -237,9 +509,10 @@ SOP_NodeVDB::evalVec3R(const char *name, fpreal time) const
 openvdb::Vec3i
 SOP_NodeVDB::evalVec3i(const char *name, fpreal time) const
 {
-    return openvdb::Vec3i(evalInt(name, 0, time),
-                          evalInt(name, 1, time),
-                          evalInt(name, 2, time));
+    using ValueT = openvdb::Vec3i::value_type;
+    return openvdb::Vec3i(static_cast<ValueT>(evalInt(name, 0, time)),
+                          static_cast<ValueT>(evalInt(name, 1, time)),
+                          static_cast<ValueT>(evalInt(name, 2, time)));
 }
 
 openvdb::Vec2R
@@ -252,8 +525,18 @@ SOP_NodeVDB::evalVec2R(const char *name, fpreal time) const
 openvdb::Vec2i
 SOP_NodeVDB::evalVec2i(const char *name, fpreal time) const
 {
-    return openvdb::Vec2i(evalInt(name, 0, time),
-                          evalInt(name, 1, time));
+    using ValueT = openvdb::Vec2i::value_type;
+    return openvdb::Vec2i(static_cast<ValueT>(evalInt(name, 0, time)),
+                          static_cast<ValueT>(evalInt(name, 1, time)));
+}
+
+
+std::string
+SOP_NodeVDB::evalStdString(const char* name, fpreal time, int index) const
+{
+    UT_String str;
+    evalString(str, name, index, time);
+    return str.toStdString();
 }
 
 
@@ -282,7 +565,7 @@ namespace {
 class SESIOpenVDBOpPolicy: public houdini_utils::OpPolicy
 {
 public:
-    virtual std::string getName(const houdini_utils::OpFactory&, const std::string& english)
+    std::string getName(const houdini_utils::OpFactory&, const std::string& english) override
     {
         UT_String s(english);
         // Lowercase
@@ -298,7 +581,7 @@ public:
 
     /// @brief OpenVDB operators of each flavor (SOP, POP, etc.) share
     /// an icon named "SOP_OpenVDB", "POP_OpenVDB", etc.
-    virtual std::string getIconName(const houdini_utils::OpFactory& factory)
+    std::string getIconName(const houdini_utils::OpFactory& factory) override
     {
         return factory.flavorString() + "_OpenVDB";
     }
@@ -311,7 +594,7 @@ class DWAOpenVDBOpPolicy: public houdini_utils::DWAOpPolicy
 public:
     /// @brief OpenVDB operators of each flavor (SOP, POP, etc.) share
     /// an icon named "SOP_OpenVDB", "POP_OpenVDB", etc.
-    virtual std::string getIconName(const houdini_utils::OpFactory& factory)
+    std::string getIconName(const houdini_utils::OpFactory& factory) override
     {
         return factory.flavorString() + "_OpenVDB";
     }
@@ -319,9 +602,9 @@ public:
 
 
 #ifdef SESI_OPENVDB
-typedef SESIOpenVDBOpPolicy OpenVDBOpPolicy;
+using OpenVDBOpPolicy = SESIOpenVDBOpPolicy;
 #else
-typedef DWAOpenVDBOpPolicy  OpenVDBOpPolicy;
+using OpenVDBOpPolicy = DWAOpenVDBOpPolicy;
 #endif // SESI_OPENVDB
 
 } // unnamed namespace
@@ -339,6 +622,6 @@ OpenVDBOpFactory::OpenVDBOpFactory(
 
 } // namespace openvdb_houdini
 
-// Copyright (c) 2012-2013 DreamWorks Animation LLC
+// Copyright (c) 2012-2018 DreamWorks Animation LLC
 // All rights reserved. This software is distributed under the
 // Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )

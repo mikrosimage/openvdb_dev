@@ -1,5 +1,5 @@
 #!/usr/local/bin/python
-# Copyright (c) 2012-2013 DreamWorks Animation LLC
+# Copyright (c) 2012-2018 DreamWorks Animation LLC
 #
 # All rights reserved. This software is distributed under the
 # Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
@@ -36,12 +36,12 @@ import os, os.path
 import sys
 import unittest
 try:
-    import pyopenvdb as openvdb
-except ImportError:
     import studioenv
     from studio.ani import Ani
     from studio import logging
     from studio import openvdb
+except ImportError:
+    import pyopenvdb as openvdb
 
 
 def valueFactory(zeroValue, elemValue):
@@ -77,9 +77,9 @@ class TestOpenVDB(unittest.TestCase):
 
     def testModule(self):
         # At a minimum, BoolGrid, FloatGrid and Vec3SGrid should exist.
-        self.assert_(openvdb.BoolGrid in openvdb.GridTypes)
-        self.assert_(openvdb.FloatGrid in openvdb.GridTypes)
-        self.assert_(openvdb.Vec3SGrid in openvdb.GridTypes)
+        self.assertTrue(openvdb.BoolGrid in openvdb.GridTypes)
+        self.assertTrue(openvdb.FloatGrid in openvdb.GridTypes)
+        self.assertTrue(openvdb.Vec3SGrid in openvdb.GridTypes)
 
         # Verify that it is possible to construct a grid of each supported type.
         for cls in openvdb.GridTypes:
@@ -95,7 +95,7 @@ class TestOpenVDB(unittest.TestCase):
              [0,   1,  0,  0],
              [0,   0,  2,  0],
              [1,   2,  3,  1]])
-        self.assert_(xform1.typeName != '')
+        self.assertTrue(xform1.typeName != '')
         self.assertEqual(xform1.indexToWorld((1, 1, 1)), (1.5, 3, 5))
         xform2 = xform1
         self.assertEqual(xform2, xform1)
@@ -105,7 +105,7 @@ class TestOpenVDB(unittest.TestCase):
             xyzMin=(0, 0, 0), xyzMax=(100, 100, 100), voxelSize=0.25)
         self.assertNotEqual(xform2, xform1)
         worldp = xform2.indexToWorld((10, 10, 10))
-        worldp = map(lambda x: int(round(x * 1000000)), worldp)
+        worldp = [int(round(x * 1000000)) for x in worldp]
         self.assertEqual(worldp, [-110000, -110000, 2500000])
 
         grid = openvdb.FloatGrid()
@@ -116,11 +116,11 @@ class TestOpenVDB(unittest.TestCase):
 
     def testGridCopy(self):
         grid = openvdb.FloatGrid()
-        self.assert_(grid.sharesWith(grid))
+        self.assertTrue(grid.sharesWith(grid))
         self.assertFalse(grid.sharesWith([])) # wrong type; Grid expected
 
         copyOfGrid = grid.copy()
-        self.assert_(copyOfGrid.sharesWith(grid))
+        self.assertTrue(copyOfGrid.sharesWith(grid))
 
         deepCopyOfGrid = grid.deepCopy()
         self.assertFalse(deepCopyOfGrid.sharesWith(grid))
@@ -155,9 +155,9 @@ class TestOpenVDB(unittest.TestCase):
 
             self.assertFalse(grid.saveFloatAsHalf)
             grid.saveFloatAsHalf = True
-            self.assert_(grid.saveFloatAsHalf)
+            self.assertTrue(grid.saveFloatAsHalf)
 
-            self.assert_(grid.treeDepth > 2)
+            self.assertTrue(grid.treeDepth > 2)
 
 
     def testGridMetadata(self):
@@ -165,7 +165,7 @@ class TestOpenVDB(unittest.TestCase):
 
         self.assertEqual(grid.metadata, {})
 
-        meta = { 'name': 'test', 'saveFloatAsHalf': True, 'xyz': (-1, 0, 1) }
+        meta = dict(name='test', saveFloatAsHalf=True, xyz=(-1, 0, 1), intval=42, floatval=1.25)
         grid.metadata = meta
         self.assertEqual(grid.metadata, meta)
 
@@ -173,21 +173,23 @@ class TestOpenVDB(unittest.TestCase):
         grid.updateMetadata(meta)
         self.assertEqual(grid.metadata, meta)
 
-        self.assertEqual(set(grid.iterkeys()), set(meta.iterkeys()))
+        self.assertEqual(set(grid.iterkeys()), set(meta.keys()))
 
         for name in meta:
-            self.assert_(name in grid)
+            self.assertTrue(name in grid)
             self.assertEqual(grid[name], meta[name])
+            self.assertEqual(type(grid[name]), type(meta[name]))
 
         for name in grid:
-            self.assert_(name in grid)
+            self.assertTrue(name in grid)
             self.assertEqual(grid[name], meta[name])
+            self.assertEqual(type(grid[name]), type(meta[name]))
 
-        self.assert_('xyz' in grid)
+        self.assertTrue('xyz' in grid)
         del grid['xyz']
         self.assertFalse('xyz' in grid)
         grid['xyz'] = meta['xyz']
-        self.assert_('xyz' in grid)
+        self.assertTrue('xyz' in grid)
 
         grid.addStatsMetadata()
         meta = grid.getStatsMetadata()
@@ -210,7 +212,7 @@ class TestOpenVDB(unittest.TestCase):
 
         grid.fill((0, 0, 0), (7, 7, 7), 2, active=True)
         self.assertEqual(acc.getValue(ijk), 2)
-        self.assert_(acc.isValueOn(ijk))
+        self.assertTrue(acc.isValueOn(ijk))
 
         activeCount = grid.activeVoxelCount()
         acc.setValueOn(ijk, 2.125)
@@ -218,21 +220,21 @@ class TestOpenVDB(unittest.TestCase):
 
         grid.fill(ijk, ijk, 2.125, active=True)
         self.assertEqual(acc.getValue(ijk), 2.125)
-        self.assert_(acc.isValueOn(ijk))
+        self.assertTrue(acc.isValueOn(ijk))
         self.assertEqual(grid.activeVoxelCount(), activeCount)
         leafCount = grid.leafCount()
 
         grid.prune()
         self.assertAlmostEqual(acc.getValue(ijk), 2.125)
-        self.assert_(acc.isValueOn(ijk))
+        self.assertTrue(acc.isValueOn(ijk))
         self.assertEqual(grid.leafCount(), leafCount)
         self.assertEqual(grid.activeVoxelCount(), activeCount)
 
         grid.prune(tolerance=0.2)
         self.assertEqual(grid.activeVoxelCount(), activeCount)
-        self.assertEqual(acc.getValue(ijk), 2)
-        self.assert_(acc.isValueOn(ijk))
-        self.assert_(grid.leafCount() < leafCount)
+        self.assertEqual(acc.getValue(ijk), 2.0) # median
+        self.assertTrue(acc.isValueOn(ijk))
+        self.assertTrue(grid.leafCount() < leafCount)
 
 
     def testGridIterators(self):
@@ -338,8 +340,8 @@ class TestOpenVDB(unittest.TestCase):
                 acc.setValueOn(c) # active / 0 / leaf
                 self.assertEqual(acc.getValue(c), zero)
                 self.assertEqual(cacc.getValue(c), zero)
-                self.assert_(acc.isValueOn(c))
-                self.assert_(cacc.isValueOn(c))
+                self.assertTrue(acc.isValueOn(c))
+                self.assertTrue(cacc.isValueOn(c))
                 self.assertEqual(acc.getValueDepth(c), leafDepth)
                 self.assertEqual(cacc.getValueDepth(c), leafDepth)
 
@@ -380,9 +382,9 @@ class TestOpenVDB(unittest.TestCase):
         # Verify that changes made to the grid through one accessor are reflected in the other.
         acc.setValueOn(xyz, True)
         self.assertEqual(acc.getValue(xyz), True)
-        self.assert_(acc.isValueOn(xyz))
+        self.assertTrue(acc.isValueOn(xyz))
         self.assertEqual(copyOfAcc.getValue(xyz), True)
-        self.assert_(copyOfAcc.isValueOn(xyz))
+        self.assertTrue(copyOfAcc.isValueOn(xyz))
 
         copyOfAcc.setValueOff(xyz)
         self.assertEqual(acc.getValue(xyz), True)
@@ -394,9 +396,9 @@ class TestOpenVDB(unittest.TestCase):
         # have cached different sets of nodes.
         xyz2 = (-1, -1, -1)
         copyOfAcc.setValueOn(xyz2)
-        self.assert_(copyOfAcc.isCached(xyz2))
+        self.assertTrue(copyOfAcc.isCached(xyz2))
         self.assertFalse(copyOfAcc.isCached(xyz))
-        self.assert_(acc.isCached(xyz))
+        self.assertTrue(acc.isCached(xyz))
         self.assertFalse(acc.isCached(xyz2))
 
 
@@ -461,7 +463,7 @@ class TestOpenVDB(unittest.TestCase):
         # for inactive values.)
         aGrid.combine(bGrid, lambda a, b: 2 * min(a, b) + 3 * max(a, b))
 
-        self.assert_(bGrid.empty())
+        self.assertTrue(bGrid.empty())
 
         # Verify that the resulting grid's values are as expected.
         for original, combined in zip(copyOfAGrid.iterOnValues(), aGrid.iterOnValues()):
@@ -480,8 +482,8 @@ class TestOpenVDB(unittest.TestCase):
         HALF_WIDTH = 4
         sphere = openvdb.createLevelSetSphere(halfWidth=HALF_WIDTH, voxelSize=1.0, radius=100.0)
         lo, hi = sphere.evalMinMax()
-        self.assert_(lo >= -HALF_WIDTH)
-        self.assert_(hi <= HALF_WIDTH)
+        self.assertTrue(lo >= -HALF_WIDTH)
+        self.assertTrue(hi <= HALF_WIDTH)
 
 
     def testCopyFromArray(self):
@@ -495,7 +497,7 @@ class TestOpenVDB(unittest.TestCase):
             return
 
         # Skip this test if the OpenVDB module was built without NumPy support.
-        arr = np.ndarray((1, 2, 1))
+        arr = np.zeros((1, 2, 1))
         grid = openvdb.FloatGrid()
         try:
             grid.copyFromArray(arr)
@@ -505,11 +507,11 @@ class TestOpenVDB(unittest.TestCase):
         # Verify that a non-three-dimensional array can't be copied into a grid.
         grid = openvdb.FloatGrid()
         self.assertRaises(TypeError, lambda: grid.copyFromArray('abc'))
-        arr = np.ndarray((1, 2))
+        arr = np.zeros((1, 2))
         self.assertRaises(ValueError, lambda: grid.copyFromArray(arr))
 
         # Verify that complex-valued arrays are not supported.
-        arr = np.ndarray((1, 2, 1), dtype = complex)
+        arr = np.zeros((1, 2, 1), dtype = complex)
         grid = openvdb.FloatGrid()
         self.assertRaises(TypeError, lambda: grid.copyFromArray(arr))
 
@@ -577,7 +579,7 @@ class TestOpenVDB(unittest.TestCase):
                 for c in coords:
                     self.assertEqual(acc.getValue(c), gridFG)
                 for value in grid.iterOnValues():
-                    self.assert_(value.min in coords)
+                    self.assertTrue(value.min in coords)
 
 
     def testCopyToArray(self):
@@ -591,7 +593,7 @@ class TestOpenVDB(unittest.TestCase):
             return
 
         # Skip this test if the OpenVDB module was built without NumPy support.
-        arr = np.ndarray((1, 2, 1))
+        arr = np.zeros((1, 2, 1))
         grid = openvdb.FloatGrid()
         try:
             grid.copyFromArray(arr)
@@ -601,11 +603,11 @@ class TestOpenVDB(unittest.TestCase):
         # Verify that a grid can't be copied into a non-three-dimensional array.
         grid = openvdb.FloatGrid()
         self.assertRaises(TypeError, lambda: grid.copyToArray('abc'))
-        arr = np.ndarray((1, 2))
+        arr = np.zeros((1, 2))
         self.assertRaises(ValueError, lambda: grid.copyToArray(arr))
 
         # Verify that complex-valued arrays are not supported.
-        arr = np.ndarray((1, 2, 1), dtype = complex)
+        arr = np.zeros((1, 2, 1), dtype = complex)
         grid = openvdb.FloatGrid()
         self.assertRaises(TypeError, lambda: grid.copyToArray(arr))
 
@@ -672,9 +674,110 @@ class TestOpenVDB(unittest.TestCase):
                 self.assertEqual(np.amax(arr), BG)
 
 
+    def testMeshConversion(self):
+        import time
+
+        # Skip this test if NumPy is not available.
+        try:
+            import numpy as np
+        except ImportError:
+            return
+
+        # Test mesh to volume conversion.
+
+        # Generate the vertices of a cube.
+        cubeVertices = [(x, y, z) for x in (0, 100) for y in (0, 100) for z in (0, 100)]
+        cubePoints = np.array(cubeVertices, float)
+
+        # Generate the faces of a cube.
+        cubeQuads = np.array([
+            (0, 1, 3, 2), # left
+            (0, 2, 6, 4), # front
+            (4, 6, 7, 5), # right
+            (5, 7, 3, 1), # back
+            (2, 3, 7, 6), # top
+            (0, 4, 5, 1), # bottom
+        ], float)
+
+        voxelSize = 2.0
+        halfWidth = 3.0
+        xform = openvdb.createLinearTransform(voxelSize)
+
+        # Only scalar, floating-point grids support createLevelSetFromPolygons()
+        # (and the OpenVDB module might have been compiled without DoubleGrid support).
+        grids = []
+        for gridType in [n for n in openvdb.GridTypes
+            if n.__name__ in ('FloatGrid', 'DoubleGrid')]:
+
+            # Skip this test if the OpenVDB module was built without NumPy support.
+            try:
+                grid = gridType.createLevelSetFromPolygons(
+                    cubePoints, quads=cubeQuads, transform=xform, halfWidth=halfWidth)
+            except NotImplementedError:
+                return
+
+            #openvdb.write('/tmp/testMeshConversion.vdb', grid)
+
+            self.assertEqual(grid.transform, xform)
+            self.assertEqual(grid.background, halfWidth * voxelSize)
+
+            dim = grid.evalActiveVoxelDim()
+            self.assertTrue(50 < dim[0] < 58)
+            self.assertTrue(50 < dim[1] < 58)
+            self.assertTrue(50 < dim[2] < 58)
+
+            grids.append(grid)
+
+        # Boolean-valued grids can't be used to store level sets.
+        self.assertRaises(TypeError, lambda: openvdb.BoolGrid.createLevelSetFromPolygons(
+            cubePoints, quads=cubeQuads, transform=xform, halfWidth=halfWidth))
+        # Vector-valued grids can't be used to store level sets.
+        self.assertRaises(TypeError, lambda: openvdb.Vec3SGrid.createLevelSetFromPolygons(
+            cubePoints, quads=cubeQuads, transform=xform, halfWidth=halfWidth))
+        # The "points" argument to createLevelSetFromPolygons() must be a NumPy array.
+        self.assertRaises(TypeError, lambda: openvdb.FloatGrid.createLevelSetFromPolygons(
+            cubeVertices, quads=cubeQuads, transform=xform, halfWidth=halfWidth))
+        # The "points" argument to createLevelSetFromPolygons() must be a NumPy float or int array.
+        self.assertRaises(TypeError, lambda: openvdb.FloatGrid.createLevelSetFromPolygons(
+            np.array(cubeVertices, bool), quads=cubeQuads, transform=xform, halfWidth=halfWidth))
+        # The "triangles" argument to createLevelSetFromPolygons() must be an N x 3 NumPy array.
+        self.assertRaises(TypeError, lambda: openvdb.FloatGrid.createLevelSetFromPolygons(
+            cubePoints, triangles=cubeQuads, transform=xform, halfWidth=halfWidth))
+
+        # Test volume to mesh conversion.
+
+        # Vector-valued grids can't be meshed.
+        self.assertRaises(TypeError, lambda: openvdb.Vec3SGrid().convertToQuads())
+
+        for grid in grids:
+            points, quads = grid.convertToQuads()
+
+            # These checks are intended mainly to test the Python/C++ bindings,
+            # not the OpenVDB volume to mesh converter.
+            self.assertTrue(len(points) > 8)
+            self.assertTrue(len(quads) > 6)
+            pmin, pmax = points.min(0), points.max(0)
+            self.assertTrue(-2 < pmin[0] < 2)
+            self.assertTrue(-2 < pmin[1] < 2)
+            self.assertTrue(-2 < pmin[2] < 2)
+            self.assertTrue(98 < pmax[0] < 102)
+            self.assertTrue(98 < pmax[1] < 102)
+            self.assertTrue(98 < pmax[2] < 102)
+
+            points, triangles, quads = grid.convertToPolygons(adaptivity=1)
+
+            self.assertTrue(len(points) > 8)
+            pmin, pmax = points.min(0), points.max(0)
+            self.assertTrue(-2 < pmin[0] < 2)
+            self.assertTrue(-2 < pmin[1] < 2)
+            self.assertTrue(-2 < pmin[2] < 2)
+            self.assertTrue(98 < pmax[0] < 102)
+            self.assertTrue(98 < pmax[1] < 102)
+            self.assertTrue(98 < pmax[2] < 102)
+
 
 if __name__ == '__main__':
-    print 'Testing', os.path.dirname(openvdb.__file__)
+    print('Testing %s' % os.path.dirname(openvdb.__file__))
     sys.stdout.flush()
 
     try:
@@ -692,6 +795,6 @@ if __name__ == '__main__':
     unittest.main(argv=args)
 
 
-# Copyright (c) 2012-2013 DreamWorks Animation LLC
+# Copyright (c) 2012-2018 DreamWorks Animation LLC
 # All rights reserved. This software is distributed under the
 # Mozilla Public License 2.0 ( http://www.mozilla.org/MPL/2.0/ )
